@@ -8,12 +8,19 @@ decision, the naming contract, cadence safety, and sheet parsing.
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 
 import pytest
 
-from src import contract, ffmpeg_utils, mode1_stitch, mode2_html5, naming, runner, scheduler, sheets
+from src import (contract, ffmpeg_utils, mode1_stitch, mode2_html5, naming,
+                 renditions, runner, scheduler, sheet_model, sheets, vast)
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "scripts"))
+import expand_dco  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -624,3 +631,216 @@ def test_runner_flushes_the_write_back_buffer():
 
     runner.run_rows(rows, wb, {}, {}, prepare=_fake_prepare, render=lambda p, c, j: "/o.mp4")
     assert flushed == [True]
+
+
+# --------------------------------------------------------------------------- #
+# delivery renditions (P5)
+# --------------------------------------------------------------------------- #
+
+def test_channel_config_merges_over_the_defaults():
+    cfg = {"delivery": {"channels": {"ctv": {"ladder": [{"width": 1920, "height": 1080}]}}}}
+    ch = renditions.channel_config(cfg, "ctv")
+    assert ch["audio"] is True and ch["mezzanine"] is True   # from the default
+    assert len(ch["ladder"]) == 1                            # overridden
+
+
+def test_unknown_channel_is_refused():
+    with pytest.raises(ValueError) as e:
+        renditions.channel_config({}, "cinema")
+    assert "cinema" in str(e.value)
+
+
+def test_dooh_channel_is_muted_and_ctv_is_not():
+    assert renditions.audio_spec(renditions.channel_config({}, "dooh"), {}) is None
+    assert renditions.audio_spec(renditions.channel_config({}, "ctv"), {}) is not None
+
+
+def test_rung_overrides_the_channel_audio_bitrate():
+    ch = {"audio": True, "audio_spec": {"bitrate": "128k"}}
+    assert renditions.audio_spec(ch, {"audio_bitrate": "256k"})["bitrate"] == "256k"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("8M", 8000), ("600k", 600), ("1.5M", 1500), ("", 0), (None, 0), ("nonsense", 0),
+])
+def test_bitrate_to_kbps(raw, expected):
+    assert renditions._kbps(raw) == expected
+
+
+def test_package_is_a_no_op_without_a_delivery_block():
+    assert renditions.package("/o/x.mp4", {"stem": "x"}, {}, {}) == {}
+
+
+def test_radio_channel_is_audio_only():
+    ch = renditions.channel_config({}, "radio")
+    assert ch["audio_only"] is True
+    assert all("width" not in rung for rung in ch["ladder"])
+
+
+# --------------------------------------------------------------------------- #
+# VAST (P5)
+# --------------------------------------------------------------------------- #
+
+def _rends(**over):
+    base = {"path": "/o/spot_1920x1080.mp4", "width": 1920, "height": 1080,
+            "bitrate_kbps": 8000, "codec": "libx264", "mime": "video/mp4",
+            "bytes": 1, "role": "media"}
+    base.update(over)
+    return [base]
+
+
+def _tag(channel="dooh", renditions_=None, **cfg):
+    # `is None` on purpose: an empty list is a case under test, not a default.
+    return vast.build_inline(ad_id="spot", ad_serving_id="spot-abc", title="Camp",
+                             duration_s=10.0,
+                             renditions=_rends() if renditions_ is None else renditions_,
+                             vast_cfg=cfg, channel=channel, base_url="https://cdn.test/c")
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (10, "00:00:10"), (9.5, "00:00:09.500"), (65, "00:01:05"), (3661, "01:01:01"), (0, "00:00:00"),
+])
+def test_vast_duration_format(seconds, expected):
+    assert vast.duration_hms(seconds) == expected
+
+
+def test_vast_is_well_formed_and_carries_the_required_vast4_elements():
+    root = ET.fromstring(_tag())
+    assert root.get("version") == "4.2"
+    assert root.find(".//AdServingId") is not None, "VAST 4.1+ requires AdServingId"
+    assert root.find(".//UniversalAdId") is not None, "VAST 4 requires UniversalAdId"
+    assert root.find(".//UniversalAdId").get("idRegistry") == "unknown"
+
+
+def test_tracking_urls_keep_their_macros_and_ampersands():
+    xml = _tag(impression_url="https://ad.test/i?cb=[CACHEBUSTING]&pid=1&x=2",
+               error_url="https://ad.test/e?code=[ERRORCODE]")
+    assert "[CACHEBUSTING]" in xml and "[ERRORCODE]" in xml
+    assert "&amp;" not in xml, "an escaped & would break the query string the player calls"
+    assert "<![CDATA[" in xml
+    root = ET.fromstring(xml)
+    assert root.findtext(".//Impression").endswith("pid=1&x=2")
+
+
+def test_dooh_gets_no_clickthrough_but_ctv_does():
+    assert ET.fromstring(_tag("dooh", click_through="https://b.test")).find(".//VideoClicks") is None
+    assert ET.fromstring(_tag("ctv", click_through="https://b.test")).find(".//VideoClicks") is not None
+
+
+def test_dooh_uses_its_own_event_set():
+    xml = _tag("dooh", tracking={e: f"https://t/{e}" for e in
+                                 ("start", "complete", "firstQuartile")})
+    events = {t.get("event") for t in ET.fromstring(xml).findall(".//Tracking")}
+    assert "firstQuartile" not in events, "a street panel has no meaningful quartile"
+    assert {"start", "complete"} <= events
+
+
+def test_ctv_emits_the_full_quartile_set():
+    xml = _tag("ctv", tracking={e: f"https://t/{e}" for e in vast.QUARTILE_EVENTS})
+    events = {t.get("event") for t in ET.fromstring(xml).findall(".//Tracking")}
+    assert events == set(vast.QUARTILE_EVENTS)
+
+
+def test_every_rendition_becomes_a_mediafile_with_its_bitrate():
+    r = _rends() + [{"path": "/o/spot_1280x720.mp4", "width": 1280, "height": 720,
+                     "bitrate_kbps": 4000, "codec": "libx264", "mime": "video/mp4",
+                     "bytes": 1, "role": "media"}]
+    files = ET.fromstring(_tag("ctv", renditions_=r)).findall(".//MediaFile")
+    assert [(f.get("width"), f.get("bitrate")) for f in files] == \
+           [("1920", "8000"), ("1280", "4000")]
+    assert all(f.get("codec") == "H.264" for f in files)
+
+
+def test_mezzanine_is_emitted_when_present():
+    r = _rends() + [{"path": "/o/spot.mp4", "width": 0, "height": 0, "bitrate_kbps": 0,
+                     "codec": "libx264", "mime": "video/mp4", "bytes": 1,
+                     "role": "mezzanine"}]
+    root = ET.fromstring(_tag("ctv", renditions_=r))
+    assert root.find(".//Mezzanine") is not None, "SSAI without a mezzanine is VAST error 406"
+    assert len(root.findall(".//MediaFile")) == 1, "the mezzanine is not a MediaFile"
+
+
+def test_audio_rendition_drops_the_meaningless_scaling_attributes():
+    r = _rends(path="/o/spot.m4a", width=0, height=0, mime="audio/mp4",
+               codec="aac", bitrate_kbps=192)
+    f = ET.fromstring(_tag("radio", renditions_=r)).find(".//MediaFile")
+    assert f.get("type") == "audio/mp4" and f.get("codec") == "AAC"
+    assert (f.get("width"), f.get("height")) == ("0", "0")
+    assert f.get("scalable") is None and f.get("maintainAspectRatio") is None
+
+
+def test_a_tag_needs_at_least_one_playable_rendition():
+    with pytest.raises(ValueError):
+        _tag(renditions_=[])
+    with pytest.raises(ValueError):
+        _tag(renditions_=[dict(_rends()[0], role="mezzanine")])
+
+
+def test_asset_url_uses_the_cdn_base_or_falls_back_to_file():
+    assert vast.asset_url("/o/a.mp4", "https://cdn.test/c/") == "https://cdn.test/c/a.mp4"
+    assert vast.asset_url("/o/a.mp4", "").startswith("file:///")
+
+
+# --------------------------------------------------------------------------- #
+# sheet model + DCO expansion (P6)
+# --------------------------------------------------------------------------- #
+
+def test_sheet_model_matches_what_the_engine_reads():
+    sheet_model.check_model_matches_code()
+
+
+def test_media_tab_bridges_to_the_creative_tabs():
+    header = sheet_model.MEDIA_HEADER
+    for col in ("creative_tab", "creative_id", "creative_source",
+                "hosted_asset", "third_party_vast_url"):
+        assert col in header
+    rows = sheet_model.media_examples()
+    vast_col = header.index("third_party_vast_url")
+    assert all(r[vast_col].startswith("=") for r in rows), "the bridge must be a live lookup"
+
+
+def test_dco_axes_produce_the_cartesian_product():
+    rows = expand_dco.combinations({"market": ["FR", "BE"], "offer": ["-30%", "-50%"]})
+    assert len(rows) == 4
+    assert {"market": "FR", "offer": "-50%"} in rows
+
+
+def test_dco_exclusions_are_applied():
+    rows = expand_dco.combinations({"market": ["FR", "BE"], "offer": ["-30%", "-50%"]},
+                                   exclude=[{"market": "BE", "offer": "-50%"}])
+    assert len(rows) == 3
+    assert {"market": "BE", "offer": "-50%"} not in rows
+
+
+def test_slug_interpolation_makes_filename_safe_values():
+    values = {"market": "FR", "offer": "-50%"}
+    assert expand_dco.interpolate("cta_{offer|slug}.mp4", values) == "cta_50pct.mp4"
+    assert expand_dco.interpolate("intro_{market}.mp4", values) == "intro_FR.mp4"
+
+
+def test_expand_builds_rows_in_model_order_with_slots_resolved():
+    header, rows = expand_dco.expand({
+        "mode": "mode1",
+        "base": {"campaign": "Soldes", "channel": "dooh"},
+        "axes": {"market": ["FR", "BE"], "audience": ["young"]},
+        "slots": {"clip_1": "intro_{market}.mp4"},
+    })
+    assert len(rows) == 2
+    by_col = dict(zip(header, rows[0]))
+    assert by_col["clip_1"] == "intro_FR.mp4"
+    assert by_col["campaign"] == "Soldes"
+    assert by_col["status"] == "pending"
+    assert by_col["creative_id"] == "FR-young"
+
+
+def test_expand_refuses_two_combinations_with_the_same_id():
+    with pytest.raises(ValueError) as e:
+        expand_dco.expand({"mode": "mode1", "base": {"creative_id": "fixed"},
+                           "axes": {"market": ["FR", "BE"]}})
+    assert "same creative_id" in str(e.value)
+
+
+def test_expand_rejects_a_column_the_mode1_model_does_not_have():
+    with pytest.raises(ValueError):
+        expand_dco.expand({"mode": "mode1", "base": {"not_a_column": "x"},
+                           "axes": {"market": ["FR"]}})
