@@ -1,0 +1,21 @@
+# DCO recipe: 2 markets x 2 audiences x 2 offers = 8 creatives, minus 1 exclusion.
+mode: mode1
+base:
+  campaign: "Soldes Été"
+  advertiser: "Demo Brand"
+  channel: dooh
+  format: "1080x1920"
+  version: a
+  transition: fade
+  transition_dur: "0.5"
+  naming_template: "{campaign}_{market}_{audience}_{offer}_{version}"
+axes:
+  market: [FR, BE]
+  audience: [young, family]
+  offer: ["-30%", "-50%"]
+slots:
+  clip_1: "intro_{market}.mp4"
+  clip_2: "product_{audience}.mp4"
+  clip_3: "cta_{offer|slug}.mp4"
+exclude:
+  - {market: BE, offer: "-50%"}
