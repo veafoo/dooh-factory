@@ -220,10 +220,22 @@ _URL_RE = re.compile(
     r"<(" + "|".join(_URL_ELEMENTS) + r")([^>]*)>([^<]+)</\1>")
 
 
+def _cdata_safe(text: str) -> str:
+    """Neutralise a `]]>` sequence inside CDATA content.
+
+    A tracking URL is untrusted input (it comes from the sheet). A `]]>` in it
+    would close the CDATA section early: best case the XML is malformed and the
+    tag is rejected, worst case the remainder is parsed as markup and injects
+    elements into the VAST a player receives. The standard fix is to split the
+    sequence across two CDATA sections.
+    """
+    return text.replace("]]>", "]]]]><![CDATA[>")
+
+
 def _wrap_urls_in_cdata(xml: str) -> str:
     def repl(m: re.Match) -> str:
         tag, attrs, body = m.group(1), m.group(2), m.group(3)
-        return f"<{tag}{attrs}><![CDATA[{html.unescape(body.strip())}]]></{tag}>"
+        return f"<{tag}{attrs}><![CDATA[{_cdata_safe(html.unescape(body.strip()))}]]></{tag}>"
 
     return _URL_RE.sub(repl, xml)
 

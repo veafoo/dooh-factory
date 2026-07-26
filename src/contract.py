@@ -48,10 +48,46 @@ def parse_format(fmt, default: tuple[int, int]) -> tuple[int, int]:
     return default
 
 
-def resolve_asset(ref: str, base_dir: str) -> str:
-    """Resolve a sheet cell reference against a base dir (absolute refs pass through)."""
+class AssetOutsideBase(ValueError):
+    """A sheet cell points outside the assets directory."""
+
+
+def _outside_allowed() -> bool:
+    """Escape hatch for a trusted local run: DOOH_ALLOW_ASSETS_OUTSIDE_BASE=1.
+
+    An env var rather than a config key on purpose: it makes the exception
+    explicit per invocation and impossible to inherit silently from a checked-in
+    config that someone forgot about.
+    """
+    return os.environ.get("DOOH_ALLOW_ASSETS_OUTSIDE_BASE", "").strip() in ("1", "true", "yes")
+
+
+def resolve_asset(ref: str, base_dir: str, allow_outside: bool | None = None) -> str:
+    """Resolve a sheet cell reference against `base_dir`, confined to it.
+
+    The sheet is untrusted input: it is edited by whoever has the link, and a
+    cell reading `../../../.ssh/id_rsa` or `/etc/passwd` would otherwise be
+    read and stitched into a creative that then leaves the building. So the
+    resolved path must stay inside `base_dir` (symlinks resolved), and absolute
+    refs are rejected for the same reason.
+
+    Set `allow_outside=True` (config `assets.allow_outside_base`) only for a
+    trusted local run where assets legitimately live elsewhere.
+    """
+    if allow_outside is None:
+        allow_outside = _outside_allowed()
     ref = str(ref).strip()
-    return ref if os.path.isabs(ref) else os.path.join(base_dir, ref)
+    base = os.path.realpath(base_dir)
+    candidate = ref if os.path.isabs(ref) else os.path.join(base, ref)
+    resolved = os.path.realpath(candidate)
+    if allow_outside:
+        return resolved
+    if resolved != base and not resolved.startswith(base + os.sep):
+        raise AssetOutsideBase(
+            f"asset ref {ref!r} resolves outside the assets dir ({resolved!r} not under {base!r}). "
+            f"Fix the sheet cell, or set assets.allow_outside_base=true for a trusted run."
+        )
+    return resolved
 
 
 def output_stem(row: dict, fallback: str = "{creative_id}") -> str:

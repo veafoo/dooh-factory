@@ -1108,3 +1108,78 @@ def test_limit_caps_renders_and_counts_the_rest_as_skipped(limit, expected):
     assert s.rendered == expected == len(built)
     assert s.rendered + s.skipped == 8
     assert built == [f"s{i}" for i in range(2, 2 + expected)], "limit must keep sheet order"
+
+
+# ---------------------------------------------------------------------------
+# Security regressions. The sheet is untrusted input: it is edited by whoever
+# holds the link. These two tests lock the fixes for that.
+# ---------------------------------------------------------------------------
+class TestAssetPathConfinement:
+    """A sheet cell must not be able to read outside the assets directory."""
+
+    def test_traversal_ref_is_rejected(self, tmp_path):
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (tmp_path / "secret.txt").write_text("nope", encoding="utf-8")
+        with pytest.raises(contract.AssetOutsideBase):
+            contract.resolve_asset("../secret.txt", str(assets))
+
+    def test_absolute_ref_is_rejected(self, tmp_path):
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        with pytest.raises(contract.AssetOutsideBase):
+            contract.resolve_asset("/etc/passwd", str(assets))
+
+    def test_symlink_escaping_the_base_is_rejected(self, tmp_path):
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (tmp_path / "outside.mp4").write_text("x", encoding="utf-8")
+        try:
+            (assets / "link.mp4").symlink_to(tmp_path / "outside.mp4")
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unavailable on this platform")
+        with pytest.raises(contract.AssetOutsideBase):
+            contract.resolve_asset("link.mp4", str(assets))
+
+    def test_normal_ref_still_resolves(self, tmp_path):
+        assets = tmp_path / "assets"
+        (assets / "sub").mkdir(parents=True)
+        f = assets / "sub" / "clip.mp4"
+        f.write_text("x", encoding="utf-8")
+        assert contract.resolve_asset("sub/clip.mp4", str(assets)) == str(f.resolve())
+
+    def test_escape_hatch_is_explicit(self, tmp_path, monkeypatch):
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (tmp_path / "outside.mp4").write_text("x", encoding="utf-8")
+        monkeypatch.setenv("DOOH_ALLOW_ASSETS_OUTSIDE_BASE", "1")
+        assert contract.resolve_asset("../outside.mp4", str(assets)).endswith("outside.mp4")
+
+
+class TestCdataInjection:
+    """A `]]>` in a tracking URL must not close the CDATA section early."""
+
+    def test_sequence_is_split_across_two_sections(self):
+        assert vast._cdata_safe("a]]>b") == "a]]]]><![CDATA[>b"
+
+    def test_url_carrying_the_sequence_cannot_inject_an_element(self):
+        """The property that matters: injected markup stays text, and the XML parses.
+
+        Asserting on the serialization would be brittle; asserting on the parse
+        tree is the actual security guarantee a player relies on.
+        """
+        xml = "<Impression>https://t.example/i?x=]]>&lt;Ad&gt;</Impression>"
+        root = ET.fromstring(vast._wrap_urls_in_cdata(xml))
+        assert list(root) == [], "no element may be injected through the URL"
+        assert root.text == "https://t.example/i?x=]]><Ad>", "text must round-trip verbatim"
+
+    def test_unescaped_sequence_would_break_the_xml(self):
+        """Guards the regression itself: without the fix, this XML is invalid."""
+        naive = "<Impression><![CDATA[https://t.example/i?x=]]><Ad/>]]></Impression>"
+        with pytest.raises(ET.ParseError):
+            ET.fromstring(naive)
+
+    def test_plain_url_is_untouched(self):
+        xml = "<Impression>https://t.example/i?a=1&amp;b=2</Impression>"
+        assert vast._wrap_urls_in_cdata(xml) == \
+            "<Impression><![CDATA[https://t.example/i?a=1&b=2]]></Impression>"
