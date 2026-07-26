@@ -40,6 +40,20 @@ def run(cmd: list[str]) -> str:
     return p.stdout
 
 
+def probe_duration(path: str, ffprobe_bin: str = "ffprobe") -> float:
+    """Container duration, whatever the streams are.
+
+    `probe` insists on a video stream because everything downstream of it needs
+    dimensions; a radio spot has none, and only ever needs the duration.
+    """
+    out = run([ffprobe_bin, "-v", "error", "-show_entries", "format=duration",
+               "-of", "default=nw=1:nk=1", path]).strip()
+    try:
+        return float(out)
+    except ValueError:
+        raise FFmpegError(f"could not read duration of {path}") from None
+
+
 def probe(path: str, ffprobe_bin: str = "ffprobe") -> dict:
     """ffprobe a clip -> {width, height, fps, pix_fmt, duration, has_audio}."""
     cmd = [
@@ -119,6 +133,25 @@ def _double(rate) -> str:
         return s
 
 
+def audio_args(spec: dict | bool | None) -> list[str]:
+    """Output audio flags.
+
+    DOOH screens are muted, so `-an` stays the default. CTV and mobile ads carry
+    sound, and a silent CTV rendition gets rejected or simply sounds broken, so
+    a channel that wants audio gets AAC stereo at 48 kHz - the baseline every
+    player accepts.
+    """
+    if not spec:
+        return ["-an"]
+    spec = {} if spec is True else spec
+    return [
+        "-c:a", spec.get("codec", "aac"),
+        "-b:a", str(spec.get("bitrate", "128k")),
+        "-ar", str(spec.get("sample_rate", 48000)),
+        "-ac", str(spec.get("channels", 2)),
+    ]
+
+
 def _fit(w: int, h: int, fps: int) -> str:
     """Filter chain fitting any source into WxH: letterbox, square pixels, CFR."""
     return (
@@ -192,17 +225,23 @@ def concat_normalized(
     transition: str | None = None,
     transition_duration: float = 0.5,
     clip_durations: list[float] | None = None,
+    audio: dict | bool | None = None,
 ) -> None:
-    """Stitch heterogeneous clips into one DOOH creative in a single pass.
+    """Stitch heterogeneous clips into one creative in a single pass.
 
     Each input is scaled/padded to WxH, SAR normalized and fps-locked, then
     joined. Still images are looped for `durations[i]` (or `still_duration`)
-    seconds. Videos are trimmed at the input when a duration is given. Audio is
-    dropped - public screens are muted.
+    seconds. Videos are trimmed at the input when a duration is given.
+
+    Audio is dropped by default - DOOH screens are muted. With `audio` set (CTV,
+    mobile) the clips' audio is concatenated too; clips that carry no audio
+    track, and still images, are filled with silence of the right length, since
+    ffmpeg's concat filter refuses a stream count that varies between segments.
 
     With `transition` set (any ffmpeg xfade name: fade, wipeleft, dissolve...)
     clips cross-fade instead of hard-cutting; `clip_durations` is then required
-    to lay out the offsets - see `effective_durations`.
+    to lay out the offsets - see `effective_durations`. Audio is cross-faded to
+    match, so picture and sound stay in step.
     """
     if not clips:
         raise ValueError("no clips to concat")
@@ -210,6 +249,10 @@ def concat_normalized(
     durations = list(durations or [None] * len(clips))
     if len(durations) != len(clips):
         raise ValueError("durations must be parallel to clips")
+    if audio and not clip_durations:
+        # Silence padding needs to know how long each segment lasts.
+        clip_durations = effective_durations(clips, durations, still_duration,
+                                             ff.get("ffprobe_bin", "ffprobe"))
 
     cmd: list[str] = [ff.get("bin", "ffmpeg"), "-y"]
     for clip, dur in zip(clips, durations):
@@ -220,23 +263,62 @@ def concat_normalized(
         cmd += ["-i", clip]
 
     chains = [_norm_chain(i, width, height, fps) for i in range(len(clips))]
+    a_labels: list[str] = []
+    if audio:
+        rate = (audio if isinstance(audio, dict) else {}).get("sample_rate", 48000)
+        silence_idx = len(clips)
+        cmd += ["-f", "lavfi", "-i", f"anullsrc=r={rate}:cl=stereo"]
+        for i, clip in enumerate(clips):
+            has_audio = (not is_image(clip)
+                         and probe(clip, ff.get("ffprobe_bin", "ffprobe"))["has_audio"])
+            if has_audio:
+                chains.append(f"[{i}:a]aresample={rate},aformat=channel_layouts=stereo,"
+                              f"asetpts=PTS-STARTPTS[a{i}]")
+            else:
+                chains.append(f"[{silence_idx}:a]atrim=duration={clip_durations[i]},"
+                              f"aresample={rate},asetpts=PTS-STARTPTS[a{i}]")
+            a_labels.append(f"[a{i}]")
+
     if transition and len(clips) > 1:
         if not clip_durations:
             raise ValueError("transitions need clip_durations")
         xfade, out_label = _xfade_chain(len(clips), clip_durations,
                                         transition, transition_duration)
-        filt = ";".join(chains) + ";" + xfade
-        cmd += ["-filter_complex", filt, "-map", f"[{out_label}]"]
+        chains.append(xfade)
+        maps = ["-map", f"[{out_label}]"]
+        if audio:
+            across, a_out = _acrossfade_chain(len(clips), transition_duration)
+            chains.append(across)
+            maps += ["-map", f"[{a_out}]"]
+        filt = ";".join(chains)
     else:
         labels = "".join(f"[v{i}]" for i in range(len(clips)))
-        filt = ";".join(chains) + f";{labels}concat=n={len(clips)}:v=1:a=0[out]"
-        cmd += ["-filter_complex", filt, "-map", "[out]"]
-    cmd += video_args(ff)
-    cmd += ["-an"]
+        n = len(clips)
+        if audio:
+            interleaved = "".join(f"[v{i}][a{i}]" for i in range(n))
+            chains.append(f"{interleaved}concat=n={n}:v=1:a=1[vout][aout]")
+            maps = ["-map", "[vout]", "-map", "[aout]"]
+        else:
+            chains.append(f"{labels}concat=n={n}:v=1:a=0[vout]")
+            maps = ["-map", "[vout]"]
+        filt = ";".join(chains)
+
+    cmd += ["-filter_complex", filt] + maps
+    cmd += video_args(ff) + audio_args(audio)
     if max_duration:
         cmd += ["-t", str(max_duration)]
     cmd += [dst]
     run(cmd)
+
+
+def _acrossfade_chain(n: int, d: float) -> tuple[str, str]:
+    """Audio counterpart of the xfade chain, so sound follows the picture."""
+    parts, prev = [], "a0"
+    for k in range(1, n):
+        label = f"ax{k}"
+        parts.append(f"[{prev}][a{k}]acrossfade=d={d}:c1=tri:c2=tri[{label}]")
+        prev = label
+    return ";".join(parts), prev
 
 
 def encode(
@@ -294,6 +376,94 @@ def transcode_capture(
     if duration:
         cmd += ["-t", str(duration)]
     cmd += ["-vf", _fit(width, height, fps)] + video_args(ff) + ["-an", dst]
+    run(cmd)
+
+
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus"}
+
+
+def is_audio(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in AUDIO_EXTS
+
+
+def concat_audio(
+    clips: list[str], dst: str, *, ff: dict | None = None,
+    durations: list[float | None] | None = None,
+    audio: dict | bool | None = True,
+    max_duration: float | None = None,
+    crossfade: float = 0.0,
+) -> None:
+    """Stitch audio rushes into one radio / audio spot.
+
+    Same spine as the video path, minus the picture: a radio ad is a sequence of
+    beds and voice-overs, and DCO on radio means swapping the middle segment per
+    market or per store. Inputs may be audio files or videos carrying audio -
+    only the audio stream is taken either way.
+    """
+    if not clips:
+        raise ValueError("no clips to concat")
+    ff = ff or {}
+    durations = list(durations or [None] * len(clips))
+    if len(durations) != len(clips):
+        raise ValueError("durations must be parallel to clips")
+    rate = (audio if isinstance(audio, dict) else {}).get("sample_rate", 48000)
+
+    cmd: list[str] = [ff.get("bin", "ffmpeg"), "-y"]
+    for clip, dur in zip(clips, durations):
+        if dur:
+            cmd += ["-t", str(dur)]
+        cmd += ["-i", clip]
+
+    chains = [f"[{i}:a]aresample={rate},aformat=channel_layouts=stereo,"
+              f"asetpts=PTS-STARTPTS[a{i}]" for i in range(len(clips))]
+    if crossfade and len(clips) > 1:
+        chain, out = _acrossfade_chain(len(clips), crossfade)
+        chains.append(chain)
+    else:
+        labels = "".join(f"[a{i}]" for i in range(len(clips)))
+        chains.append(f"{labels}concat=n={len(clips)}:v=0:a=1[aout]")
+        out = "aout"
+
+    cmd += ["-filter_complex", ";".join(chains), "-map", f"[{out}]", "-vn"]
+    cmd += audio_args(audio or True)
+    if max_duration:
+        cmd += ["-t", str(max_duration)]
+    cmd += [dst]
+    run(cmd)
+
+
+def transcode_audio(src: str, dst: str, *, ff: dict | None = None,
+                    audio: dict | bool | None = True) -> None:
+    """Derive one audio delivery rendition from the master."""
+    ff = ff or {}
+    run([ff.get("bin", "ffmpeg"), "-y", "-i", src, "-vn"] + audio_args(audio or True) + [dst])
+
+
+def transcode_rendition(
+    src: str, dst: str, *, width: int, height: int, fps: int,
+    ff: dict | None = None, audio: dict | bool | None = None,
+    audio_track: str | None = None,
+) -> None:
+    """Derive one delivery rendition from the master.
+
+    The master is encoded once at the highest quality of the ladder; every
+    rendition is a transcode of it. `audio_track` muxes an external soundtrack -
+    the browser capture path produces no audio at all, so a CTV variant built
+    from an HTML5 template gets its sound this way.
+    """
+    ff = ff or {}
+    cmd = [ff.get("bin", "ffmpeg"), "-y", "-i", src]
+    if audio_track:
+        cmd += ["-i", audio_track]
+    cmd += ["-vf", _fit(width, height, fps)]
+    if audio and audio_track:
+        # Take video from the master, audio from the track, stop at the shorter.
+        cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+    elif audio:
+        cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+    else:
+        cmd += ["-map", "0:v:0"]
+    cmd += video_args(ff) + audio_args(audio) + [dst]
     run(cmd)
 
 

@@ -26,7 +26,8 @@ import re
 from datetime import datetime, timezone
 
 # Columns the tool owns. Never injected as creative params, never hashed.
-WRITE_BACK_COLS = ("output_path", "status", "message", "input_hash", "rendered_at")
+WRITE_BACK_COLS = ("output_path", "status", "message", "input_hash", "rendered_at",
+                   "vast_path", "renditions")
 # Internal bookkeeping added by sheets.read_rows().
 META_COLS = ("_row",)
 RESERVED = set(WRITE_BACK_COLS) | set(META_COLS)

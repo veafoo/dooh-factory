@@ -26,7 +26,7 @@ import logging
 import os
 import re
 
-from . import contract, ffmpeg_utils, runner
+from . import contract, ffmpeg_utils, renditions, runner
 
 log = logging.getLogger("dooh.mode1")
 
@@ -97,6 +97,13 @@ def prepare(row: dict, cfg: dict, job: dict | None = None) -> dict:
     # Per-format ingest spec, if this screen format declares one.
     enc = contract.encoding_for(ff, width, height)
 
+    channel = str(row.get("channel", "") or job.get("channel", "") or "dooh").strip().lower()
+    audio_track = row.get("audio_track", "").strip() if row.get("audio_track") else ""
+    if audio_track:
+        audio_track = contract.resolve_asset(audio_track, paths["assets_dir"])
+        if not os.path.isfile(audio_track):
+            raise FileNotFoundError(f"audio track not found: {audio_track}")
+
     transition = str(row.get("transition", "") or job.get("transition", "") or "").strip().lower()
     trans_dur = (_num(row.get("transition_dur"), None) or _num(job.get("transition_dur"), None)
                  or _num(ff.get("transition_duration_s"), 0.5))
@@ -105,17 +112,24 @@ def prepare(row: dict, cfg: dict, job: dict | None = None) -> dict:
     clip_lengths = (ffmpeg_utils.effective_durations(
         clips, durations, still, enc.get("ffprobe_bin", "ffprobe")) if transition else None)
 
+    audio_only = bool(renditions.channel_config(cfg, channel).get("audio_only")) \
+        if (cfg.get("delivery") or {}) else False
+
     stem = contract.output_stem(row, job.get("naming_fallback", "{creative_id}"))
     # The render spec is part of the fingerprint: change the codec or the
     # target format in config and every done row correctly goes stale.
+    # The delivery ladder is part of the fingerprint too: switch a row from
+    # dooh to ctv and it must rebuild, not report a stale muted master.
+    ladder = str((cfg.get("delivery") or {}).get("channels", {}).get(channel, ""))
     spec = "|".join(str(x) for x in [
         width, height, fps, max_duration, still, transition, trans_dur,
         enc.get("video_codec"), enc.get("crf"), enc.get("bitrate"), enc.get("maxrate"),
         enc.get("profile"), enc.get("level"), enc.get("gop"), enc.get("pix_fmt"),
+        channel, ladder, audio_track,
     ])
     return {
         "stem": stem,
-        "files": clips,
+        "files": clips + ([audio_track] if audio_track else []),
         "hash": contract.compute_input_hash(row, clips, spec),
         "clips": clips,
         "durations": durations,
@@ -128,21 +142,43 @@ def prepare(row: dict, cfg: dict, job: dict | None = None) -> dict:
         "transition": transition or None,
         "transition_duration": trans_dur,
         "encoding": enc,
-        "dst": os.path.join(paths["output_dir"], f"{stem}.mp4"),
+        "channel": channel,
+        "audio_track": audio_track or None,
+        "title": row.get("campaign") or stem,
+        "audio_only": audio_only,
+        "dst": os.path.join(paths["output_dir"], f"{stem}.{'m4a' if audio_only else 'mp4'}"),
     }
 
 
 def render(plan: dict, cfg: dict, job: dict | None = None) -> str:
-    """Stitch one prepared row into its finished creative."""
+    """Stitch one prepared row into its master, then package it for delivery."""
     os.makedirs(os.path.dirname(plan["dst"]) or ".", exist_ok=True)
+    channel_cfg = ((cfg.get("delivery") or {}).get("channels") or {}).get(plan["channel"])
+    if channel_cfg is None and (cfg.get("delivery") or {}):
+        channel_cfg = renditions.channel_config(cfg, plan["channel"])
+    # The master carries audio only if the channel delivers it; DOOH stays muted.
+    wants_audio = bool((channel_cfg or {}).get("audio")) and not plan["audio_track"]
+
+    if plan.get("audio_only"):
+        # Radio / audio spot: same sequencing logic, no picture.
+        ffmpeg_utils.concat_audio(
+            plan["clips"], plan["dst"], ff=plan["encoding"], durations=plan["durations"],
+            audio=(channel_cfg or {}).get("audio_spec") or True,
+            max_duration=plan["max_duration"],
+            crossfade=plan["transition_duration"] if plan["transition"] else 0.0,
+        )
+        plan["extra"] = renditions.package(plan["dst"], plan, cfg, job)
+        return plan["dst"]
+
     ffmpeg_utils.concat_normalized(
         plan["clips"], plan["dst"],
         width=plan["width"], height=plan["height"], fps=plan["fps"],
         ff=plan["encoding"], durations=plan["durations"],
         still_duration=plan["still_duration"], max_duration=plan["max_duration"],
         transition=plan["transition"], transition_duration=plan["transition_duration"],
-        clip_durations=plan["clip_lengths"],
+        clip_durations=plan["clip_lengths"], audio=wants_audio,
     )
+    plan["extra"] = renditions.package(plan["dst"], plan, cfg, job)
     return plan["dst"]
 
 

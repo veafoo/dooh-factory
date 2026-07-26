@@ -46,7 +46,7 @@ import tempfile
 import time
 from urllib.parse import urlencode, urlparse, urlunparse
 
-from . import contract, ffmpeg_utils, runner
+from . import contract, ffmpeg_utils, renditions, runner
 
 log = logging.getLogger("dooh.mode2")
 
@@ -54,7 +54,7 @@ log = logging.getLogger("dooh.mode2")
 CONTROL_COLS = {
     "variant_id", "creative_id", "template", "format", "capture", "inject",
     "duration_s", "fps", "wait_selector", "wait_ms", "device_scale_factor",
-    "naming_template", "output_name", "static_format",
+    "naming_template", "output_name", "static_format", "channel", "audio_track",
 }
 
 _SEEK_PROBE = "typeof window.__seek === 'function'"
@@ -135,18 +135,30 @@ def prepare(row: dict, cfg: dict, job: dict | None = None) -> dict:
     static_format = str(_pick(row, job, "static_format", "jpg")).lower().lstrip(".")
     ext = "mp4" if capture in ("video", "frames") else static_format
 
+    channel = str(_pick(row, job, "channel", "dooh")).lower()
+    audio_track = str(row.get("audio_track", "") or job.get("audio_track", "") or "").strip()
+    if audio_track:
+        audio_track = contract.resolve_asset(audio_track, paths["assets_dir"])
+        if not os.path.isfile(audio_track):
+            raise FileNotFoundError(f"audio track not found: {audio_track}")
+
     stem = contract.output_stem(row, job.get("naming_fallback", "{variant_id}"))
+    ladder = str((cfg.get("delivery") or {}).get("channels", {}).get(channel, ""))
     spec = "|".join(str(x) for x in [
         width, height, fps, duration, inject, capture, ext,
         ff.get("video_codec"), ff.get("crf"), ff.get("bitrate"),
         ff.get("profile"), ff.get("level"), ff.get("gop"),
         job.get("device_scale_factor"), job.get("wait_until"), job.get("settle_ms"),
+        channel, ladder, audio_track,
     ])
-    files = [local] if local else []
+    files = ([local] if local else []) + ([audio_track] if audio_track else [])
     return {
         "stem": stem,
         "files": files,
         "hash": contract.compute_input_hash(row, files, spec),
+        "channel": channel,
+        "audio_track": audio_track or None,
+        "title": row.get("campaign") or stem,
         "url": build_url(url, params, inject),
         "params": params,
         "inject": inject,
@@ -241,11 +253,14 @@ class Session:
         how = plan["capture"]
         if how == "static":
             return self._capture_static(plan)
-        if how == "frames":
-            return self._capture_frames(plan)
-        if how == "video":
-            return self._capture_video(plan)
-        raise ValueError(f"unknown capture mode: {how}")
+        if how not in ("frames", "video"):
+            raise ValueError(f"unknown capture mode: {how}")
+
+        path = self._capture_frames(plan) if how == "frames" else self._capture_video(plan)
+        # A browser capture has no audio track of its own, so a CTV or mobile
+        # variant gets its sound from the row's `audio_track` at rendition time.
+        plan["extra"] = renditions.package(path, plan, cfg, job)
+        return path
 
     def _capture_static(self, plan: dict) -> str:
         ctx, page = self._open(plan, {})

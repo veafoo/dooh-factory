@@ -84,9 +84,9 @@ def run_rows(
     claimed: dict[str, int] = {}  # stem -> sheet row, guards silent overwrites
     todo: list[tuple[dict, dict, str]] = []
 
-    def report(row, path, status, msg="", input_hash=None):
+    def report(row, path, status, msg="", input_hash=None, **extra):
         with lock:
-            write_back(row, path, status, msg, input_hash=input_hash)
+            write_back(row, path, status, msg, input_hash=input_hash, **extra)
 
     # -- phase 1: plan, serially and in sheet order --------------------------
     for row in rows:
@@ -139,7 +139,10 @@ def run_rows(
         row, plan, reason = item
         try:
             path = render_fn(plan, cfg, job)
-            report(row, path, "done", "", input_hash=plan["hash"])
+            # A mode may attach delivery artefacts (vast_path, renditions) to
+            # the plan while rendering; they go back to the sheet with the row.
+            report(row, path, "done", "", input_hash=plan["hash"],
+                   **plan.get("extra", {}))
             with lock:
                 s.rendered += 1
                 s.outputs.append(path)

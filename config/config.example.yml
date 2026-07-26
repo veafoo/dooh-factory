@@ -42,6 +42,57 @@ ffmpeg:
     # "1920x1080":
     #   bitrate: "10M"
 
+# ---------------------------------------------------------------------------
+# Delivery: what a buyer actually traffics.
+# Remove this whole block to go back to "render one master MP4 and stop".
+# The ladders below are conventional starting points, NOT a quotation of a
+# specific IAB document - every network and SSP publishes its own ingest spec
+# and that spec wins. Tune them to what the buyer asks for.
+# ---------------------------------------------------------------------------
+delivery:
+  channel: "dooh"           # default; a row's `channel` column overrides
+  vast: true
+  base_url: ""              # CDN prefix for MediaFile URLs; empty = file:// (local validation)
+  channels:
+    dooh:
+      audio: false          # public screens are muted
+      mezzanine: false
+      ladder:
+        - {width: 1080, height: 1920, bitrate: "8M"}
+    ctv:
+      audio: true
+      mezzanine: true       # SSAI re-encodes from it; missing = VAST error 406
+      audio_spec: {codec: "aac", bitrate: "192k", sample_rate: 48000, channels: 2}
+      ladder:
+        - {width: 1920, height: 1080, bitrate: "8M", profile: "high", level: "4.1"}
+        - {width: 1280, height: 720, bitrate: "4M"}
+    mobile:
+      audio: true
+      mezzanine: false
+      ladder:
+        - {width: 1280, height: 720, bitrate: "2M"}
+        - {width: 854, height: 480, bitrate: "1M"}
+        - {width: 640, height: 360, bitrate: "600k"}
+
+vast:
+  version: "4.2"
+  ad_system: "dooh-factory"
+  advertiser: ""
+  id_registry: "unknown"    # 'Ad-ID' / 'clearcast' once the creative is registered
+  # Leave [CACHEBUSTING] in: the player substitutes it. Without it you either
+  # double-count or lose hits to caching.
+  impression_url: ""        # e.g. https://adserver/imp?cb=[CACHEBUSTING]
+  error_url: ""             # e.g. https://adserver/err?code=[ERRORCODE] - without
+                            # this, a player rejecting the creative is invisible
+  click_through: ""         # ignored on the dooh channel: no click on a street panel
+  click_tracking: []
+  tracking:
+    start: ""
+    firstQuartile: ""
+    midpoint: ""
+    thirdQuartile: ""
+    complete: ""
+
 scheduler:
   timezone: "Europe/Paris"
   min_interval_seconds: 60   # refuses a cadence faster than this

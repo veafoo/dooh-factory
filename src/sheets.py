@@ -123,7 +123,7 @@ def make_write_back(ws, *, buffered: bool = True):
                             "values": [[str(value)]]})
 
     def write_back(row: dict, path: str, status: str, msg: str = "",
-                   input_hash: str | None = None) -> None:
+                   input_hash: str | None = None, **extra) -> None:
         r = row["_row"]
         if path:
             _set(r, "output_path", path)
@@ -135,6 +135,10 @@ def make_write_back(ws, *, buffered: bool = True):
             _set(r, "input_hash", input_hash)
         if status == "done":
             _set(r, "rendered_at", contract.utcnow())
+        # Delivery artefacts (vast_path, renditions) when the job produces them.
+        for name, value in extra.items():
+            if value:
+                _set(r, name, value)
         if not buffered:
             flush()
 
