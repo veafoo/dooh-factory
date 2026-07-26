@@ -1067,3 +1067,44 @@ def test_schema_element_order_is_the_one_the_xsd_imposes():
 
 def test_impression_is_always_emitted_even_with_none_configured():
     assert _find(_tag(), ".//Impression") is not None
+
+
+def test_expand_mode2_axes_become_injected_creative_params():
+    """The point of the mode2 model: an axis is a column, and a column that is
+    not a control column reaches the template with no code change."""
+    header, rows = expand_dco.expand({
+        "mode": "mode2",
+        "base": {"campaign": "Drive to Store", "template": "example_store.html",
+                 "channel": "dooh", "capture": "static", "inject": "dom"},
+        "axes": {"store_id": ["FR-069-003", "FR-075-011"], "language": ["fr", "nl"]},
+        "slots": {"claim": "a {language} minutes", "logo_url": "logo_{language}.png"},
+    })
+    assert len(rows) == 4
+    row = {k: v for k, v in zip(header, rows[0]) if v}
+    row["_row"] = 2
+    params = mode2_html5.extract_params(row)
+    assert {"store_id", "language", "claim", "logo_url"} <= set(params)
+    assert not {"template", "capture", "channel", "inject", "variant_id"} & set(params)
+    assert params["logo_url"] == "logo_fr.png"
+
+
+def test_every_mode2_axis_column_is_actually_injected():
+    """A creative variable that silently never reaches the template is the
+    failure this model exists to prevent."""
+    row = {c: "x" for c in sheet_model.MODE2_AXES}
+    row["_row"] = 2
+    injected = set(mode2_html5.extract_params(row))
+    never = [c for c in sheet_model.MODE2_AXES if c not in injected]
+    assert never == ["variant_id"], f"axes that never reach the creative: {never}"
+
+
+@pytest.mark.parametrize("limit,expected", [(1, 1), (3, 3), (None, 8)])
+def test_limit_caps_renders_and_counts_the_rest_as_skipped(limit, expected):
+    rows = [{"_row": i, "stem": f"s{i}", "status": "pending"} for i in range(2, 10)]
+    built = []
+    s = runner.run_rows(rows, lambda *a, **k: None, {}, {}, prepare=_fake_prepare,
+                        render=lambda p, c, j: (built.append(p["stem"]) or "/o/x.mp4"),
+                        limit=limit)
+    assert s.rendered == expected == len(built)
+    assert s.rendered + s.skipped == 8
+    assert built == [f"s{i}" for i in range(2, 2 + expected)], "limit must keep sheet order"
