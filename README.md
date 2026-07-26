@@ -1,11 +1,16 @@
 # dooh-factory
 
+**Author:** Radwan Mezzi
+
 Automated DOOH creative factory. Reads a Google Sheet, renders flat creatives (MP4 / static) with FFmpeg, writes the output path back to the sheet. Runs on a configurable schedule.
 
 - **Mode 1** - stitch a sequence of rushes (defined per column in the sheet) into a finished creative.
 - **Mode 2** - inject variable params into an HTML5 creative and capture each variant (drive-to-store / address repiquage).
 
-Full spec: [`docs/BRIEF.md`](docs/BRIEF.md).
+- **Delivery** - every creative ships as a rendition ladder (DOOH / CTV / mobile / radio / web) wrapped in a VAST 4.2 tag.
+
+**Start here:** [`docs/PRODUCT.md`](docs/PRODUCT.md) - full product documentation, written for someone who has never seen the project.
+Column reference: [`docs/SHEET_MODEL.md`](docs/SHEET_MODEL.md). Original spec: [`docs/BRIEF.md`](docs/BRIEF.md).
 
 ## Install
 
@@ -50,7 +55,21 @@ python run.py --job mode1 --csv rows.csv
 
 ## Sheet contract
 
-One row = one creative. The tool owns five optional columns and writes them back:
+Three tabs: `mode1` (stitched creatives), `mode2` (HTML5 variants), `media_dv360`
+(the trafficking plan). Provision them with:
+
+```
+python scripts/bootstrap_sheet.py --create "dooh-factory" --share you@gmail.com
+python scripts/bootstrap_sheet.py --csv-out templates/sheet_model   # or offline, as CSV
+```
+
+Generate the DCO combinations instead of typing them:
+
+```
+python scripts/expand_dco.py examples/campaign_soldes.yml --dry-run
+```
+
+One row = one creative. The tool owns seven optional columns and writes them back:
 
 | Column | Written back | Purpose |
 |---|---|---|
@@ -59,6 +78,8 @@ One row = one creative. The tool owns five optional columns and writes them back
 | `message` | yes | error detail (falls back into `status` when absent) |
 | `input_hash` | yes | fingerprint of the row's inputs |
 | `rendered_at` | yes | UTC timestamp of the last render |
+| `vast_path` | yes | the generated VAST tag |
+| `renditions` | yes | the delivery ladder, comma-separated |
 
 `input_hash` is what makes runs idempotent: a `done` row is rebuilt when a cell
 changed, a rush was replaced on disk, or the target format/codec changed in
@@ -92,6 +113,8 @@ python tests/smoke_mode1.py   # real ffmpeg stitch + idempotency contract
 python tests/smoke_mode2.py   # real Chromium capture, all three capture modes
 ```
 
+115 offline tests. Known gaps are listed in [`docs/PRODUCT.md` §13](docs/PRODUCT.md).
+
 ## Encoding
 
 CRF by default; setting `ffmpeg.bitrate` switches to the CBR-ish rate control
@@ -107,14 +130,40 @@ ffmpeg:
     "3840x2160": {bitrate: "20M", gop: 50}
 ```
 
+## Delivery and VAST
+
+A creative is not one file. Each row produces a master, then a rendition ladder
+sized for its `channel`, then a VAST 4.2 InLine referencing every rendition.
+
+| Channel | Sound | Mezzanine | Ladder |
+|---|---|---|---|
+| `dooh` | no, screens are muted | no | one high-bitrate rendition at panel size |
+| `ctv` | yes | yes, SSAI needs it | 1080p + 720p |
+| `mobile` | yes | no | 720p down to 360p |
+| `radio` | audio only | no | AAC + MP3, no picture |
+| `web` | yes | no | 1080p down to 360p |
+
+The ladders in `config.example.yml` are conventional starting points, not a
+quotation of a specific IAB document. Every network publishes its own ingest
+spec and that spec wins.
+
+See [`docs/PRODUCT.md` §6](docs/PRODUCT.md) for why the tag carries an `<Error>`
+with `[ERRORCODE]`, a `<Mezzanine>` on CTV, and no `<VideoClicks>` on DOOH.
+
 ## Status
 
-P0-P4 done and tested end-to-end: both modes, idempotency by input hash,
+P0-P7 done and tested end-to-end: both modes, idempotency by input hash,
 scheduling (cron + daemon), xfade transitions, per-format encoding profiles,
-retries on transient Sheets failures, concurrent rendering.
+retries on transient Sheets failures, concurrent rendering, multi-rendition
+delivery with VAST 4.2, the three-tab DCO sheet model, and the radio channel.
 
 **Not yet verified: the live Google Sheet path.** There is no service account on
 the build machine, so `open_worksheet` / `read_rows` / `make_write_back` have
 never made a real API call. Row parsing and write-back buffering are unit-tested
 against raw values; the network round-trip is not. That is the first thing to
 run against a real sheet.
+
+## Author
+
+Radwan Mezzi - AdTech / adserving, DCO and server-side tracking.
+Built from scratch as a clean-room implementation of the ad-stitching / DCO pattern.

@@ -1,7 +1,8 @@
 # dooh-factory - Project Brief
 
-**Status:** P0-P3 built and tested end-to-end (v1) - pending a live Sheet run
-**Owner:** Rad
+**Status:** P0-P7 built and tested end-to-end (v1) - pending a live Sheet run
+**Product doc:** `docs/PRODUCT.md` is the entry point for anyone new. This brief is the original spec plus its history.
+**Owner:** Radwan Mezzi
 **Created:** 2026-07-25
 **Updated:** 2026-07-26
 **Language note:** internal docs in English (HQ rule). Domain terms kept as-is (créa, rush, repiquage).
@@ -225,6 +226,9 @@ Still open (do not block anything already built):
 - **P1 (Mode 1)** - done + tested: heterogeneous rushes and stills -> stitched DOOH creative, per-clip trim, duration cap, CMS-grade encoding params.
 - **P2 (Mode 2)** - done + tested: Playwright capture, 4 injection modes, 3 capture modes, one browser per batch.
 - **P3 (scheduling + idempotency)** - done + tested: cadence grammar with a minimum-interval floor, crontab generation, APScheduler daemon, input-hash idempotency, `--force` / `--dry-run` / `--limit` / `--csv`.
+- **P5 (delivery)** - done + tested: rendition ladder per channel (dooh / ctv / mobile / web), audio as a channel policy rather than a hardcoded `-an`, VAST 4.2 InLine generation. See §11.
+- **P6 (DCO model)** - done + tested: three-tab sheet model with the campaign axes as columns, sheet provisioning, and cartesian expansion of axes into rows. See `docs/SHEET_MODEL.md`.
+- **P7 (radio)** - done + tested: audio-only channel, `concat_audio`, codec/container ladder, audio MediaFiles.
 - **P4 (hardening)** - done + tested: `xfade` transitions with offset layout and a guard against a transition longer than the shortest clip; per-format encoding profiles (`ffmpeg.profiles`); retries with jittered backoff on transient Sheets/network failures (429/5xx and connection errors, never on 403); concurrent rendering with a serial planning phase.
   - **Still open:** the live Sheet run (needs a service account), and remote asset fetch/push, which is blocked on assumptions 6-7 above - the destination is a product decision, not a technical one.
 
@@ -251,3 +255,56 @@ and error messages are identical whatever the worker count.
 - `smoke_mode2.py`: static repiquage (two stores, verified visually and by output divergence), real-time video capture (~3s), deterministic frame capture via the seek hook (2.0s), query injection, idempotent second run, missing template errors that row only; 5 variants across 3 concurrent browsers with a bad row contained.
 - CLI: `--dry-run`, `--csv`, `--force`, `--limit`, `--print-cron`, exit code 1 when any row errored. Daemon ticks, skips `once` jobs, survives a failing job.
 - **Not yet verified:** the live gspread path (`open_worksheet` / `read_rows` / `make_write_back`) - no service account on this machine. Parsing and write-back buffering are unit-tested against raw values; the network call is not.
+
+
+---
+
+## 11. Delivery: renditions and VAST (P5)
+
+A creative is not one file. Each row produces a master, then a rendition ladder
+sized for its `channel`, then a VAST 4.2 InLine referencing every rendition.
+
+| Channel | Sound | Mezzanine | Ladder |
+|---|---|---|---|
+| `dooh` | no, screens are muted | no | one high-bitrate rendition at panel size |
+| `ctv` | yes | yes, SSAI re-encodes from it | 1080p + 720p |
+| `mobile` | yes | no | 720p down to 360p |
+| `radio` | audio only | no | AAC + MP3, no picture |
+| `web` | yes | no | 1080p down to 360p |
+
+**The ladders shipped in `config.example.yml` are conventional starting points,
+not a quotation of a specific IAB document.** Every network and SSP publishes its
+own ingest spec and that spec wins.
+
+Master and renditions stay separate on purpose: the master is encoded for
+quality, a rendition for a delivery bitrate. Shipping the master as the "600k
+mobile file" is how a 40 MB asset ends up in a mobile tag.
+
+### What the tag carries, and why
+
+Each item below is a known failure mode when it is missing.
+
+- `<Error>` with `[ERRORCODE]`: without it, a player rejecting the creative is
+  invisible. Zero impressions and no reason.
+- `<Mezzanine>` on CTV: server-side ad insertion re-encodes from it. Missing is
+  VAST error 406, so no ad served on SSAI inventory.
+- `<UniversalAdId>` (VAST 4) and `<AdServingId>` (4.1+). `idRegistry` stays
+  `unknown` until the creative is registered with Ad-ID or Clearcast.
+- `[CACHEBUSTING]` left in tracking URLs for the player to substitute.
+- URLs in CDATA: an unescaped `&` is invalid XML, an escaped one breaks the
+  query string the player calls.
+- No `<VideoClicks>` on DOOH: there is no click on a street panel.
+- Exact event vocabulary. A misspelled event is silently never fired.
+
+**Not done:** validation against the official IAB XSD, and a pass through the IAB
+VAST Validator. Tags are well-formed and pass xpath assertions on the critical
+nodes, but well-formed is not schema-valid. Do this before trafficking anything.
+
+### Audio (P5/P7)
+
+The pipeline forced `-an` everywhere because DOOH screens are muted. Audio is now
+a channel policy. Concatenating it means clips without an audio track, and
+stills, are filled with silence of the right length, because ffmpeg's concat
+filter refuses a stream count that varies between segments. Transitions
+cross-fade the audio to match. A browser capture carries no audio at all, which
+is what the `audio_track` column is for.
