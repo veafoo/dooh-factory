@@ -1,0 +1,28 @@
+# secrets
+config/config.yml
+config/service-account.json
+*.json.key
+
+# data
+assets/*
+!assets/.gitkeep
+output/*
+!output/.gitkeep
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# logs
+logs/*
+!logs/.gitkeep
+
+# os
+.DS_Store
+
+# local tooling config, not part of the project
+CLAUDE.md
+.claudeignore

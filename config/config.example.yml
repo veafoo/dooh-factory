@@ -1,0 +1,61 @@
+# dooh-factory config (copy to config.yml, keep secrets out of git)
+
+google:
+  service_account_json: "./config/service-account.json"  # gitignored
+  spreadsheet_id: "PUT_SHEET_ID_HERE"
+
+paths:
+  assets_dir: "./assets"        # base dir for rushes (Mode 1)
+  templates_dir: "./templates"  # HTML5 creatives (Mode 2)
+  output_dir: "./output"
+
+ffmpeg:
+  bin: "ffmpeg"
+  # DOOH output defaults. `format` in a row overrides width/height per creative.
+  width: 1080
+  height: 1920
+  fps: 25
+  video_codec: "libx264"
+  pix_fmt: "yuv420p"
+  # Rate control: set `bitrate` for the CBR-ish specs most DOOH CMS ask for,
+  # otherwise CRF is used. Leave bitrate empty to stay on CRF.
+  crf: 20
+  preset: "medium"
+  # bitrate: "8M"
+  # maxrate: "8M"
+  # bufsize: "16M"
+  profile: "high"      # baseline | main | high - match the CMS ingest spec
+  level: "4.1"
+  gop: 25              # keyframe every N frames (= 1s at 25fps); many CMS require it
+  faststart: true      # moov atom up front
+  default_duration_s: 10   # animated Mode 2 capture when the row says nothing
+  still_duration_s: 4      # hold time for a still image used as a Mode 1 rush
+  # max_duration_s: 15     # hard cap on any rendered creative
+
+scheduler:
+  timezone: "Europe/Paris"
+  min_interval_seconds: 60   # refuses a cadence faster than this
+
+jobs:
+  mode1:
+    mode: "stitch"            # FFmpeg stitching
+    worksheet: "mode1"        # sheet tab name
+    cadence: "daily@08:00"    # once | hourly | daily@HH:MM | every_N_minutes | cron:<expr>
+    naming_fallback: "{creative_id}"
+
+  mode2:
+    mode: "html5"             # HTML5 injected variant capture
+    worksheet: "mode2"
+    cadence: "hourly"
+    naming_fallback: "{variant_id}"
+    inject: "dom"             # query | window_var | postmessage | dom
+    window_var: "__DATA__"    # used when inject = window_var
+    capture: "auto"           # static | video | frames | auto
+    animated_engine: "video"  # what `auto` picks when the row has a duration
+    static_format: "jpg"      # jpg | png
+    jpeg_quality: 90
+    wait_until: "load"        # load | domcontentloaded | networkidle
+    settle_ms: 300            # extra wait after load before capturing
+    timeout_ms: 30000
+    device_scale_factor: 1    # 2 renders at 2x then downscales (crisper text)
+    headless: true
