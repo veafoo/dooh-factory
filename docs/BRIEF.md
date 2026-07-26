@@ -1,6 +1,6 @@
 # dooh-factory - Project Brief
 
-**Status:** P0-P7 built and tested end-to-end (v1) - pending a live Sheet run
+**Status:** P0-P11 built and tested end-to-end (v1) - pending a live Sheet run
 **Product doc:** `docs/PRODUCT.md` is the entry point for anyone new. This brief is the original spec plus its history.
 **Owner:** Radwan Mezzi
 **Created:** 2026-07-25
@@ -229,6 +229,10 @@ Still open (do not block anything already built):
 - **P5 (delivery)** - done + tested: rendition ladder per channel (dooh / ctv / mobile / web), audio as a channel policy rather than a hardcoded `-an`, VAST 4.2 InLine generation. See §11.
 - **P6 (DCO model)** - done + tested: three-tab sheet model with the campaign axes as columns, sheet provisioning, and cartesian expansion of axes into rows. See `docs/SHEET_MODEL.md`.
 - **P7 (radio)** - done + tested: audio-only channel, `concat_audio`, codec/container ladder, audio MediaFiles.
+- **P8 (product doc)** - done: `docs/PRODUCT.md` written for someone who has never seen the project, `docs/SHEET_MODEL.md` generated from `src/sheet_model.py` so it cannot drift.
+- **P9 (audit fixes)** - done: the documented first run did not work (example rushes are gitignored, hence `scripts/make_demo_assets.py`); the Mode 1 input hash did not cover `audio_track`; Mode 2 raised a bare `KeyError` without `assets_dir`.
+- **P10 (IAB XSD validation)** - done + tested: see §12. Four real defects, not the theoretical caveat it had been documented as.
+- **P11 (test coverage)** - done: the paths the audit exercised by hand are now in the suite.
 - **P4 (hardening)** - done + tested: `xfade` transitions with offset layout and a guard against a transition longer than the shortest clip; per-format encoding profiles (`ffmpeg.profiles`); retries with jittered backoff on transient Sheets/network failures (429/5xx and connection errors, never on 403); concurrent rendering with a serial planning phase.
   - **Still open:** the live Sheet run (needs a service account), and remote asset fetch/push, which is blocked on assumptions 6-7 above - the destination is a product decision, not a technical one.
 
@@ -250,7 +254,7 @@ and error messages are identical whatever the worker count.
 
 ### Verified (2026-07-26)
 
-- 80 offline unit tests pass (`pytest tests -q`).
+- 146 offline tests pass (`pytest tests -q`), including VAST schema validation per channel.
 - `smoke_mode1.py`: 3 heterogeneous rushes + still endframe -> 1080x1920 @ 25fps, muted, H.264 High/4.1, duration cap honoured; second run skips; a rush changed on disk re-renders; `--force` re-renders; a missing rush errors that row only; xfade shortens 9.0s to 7.5s across 3 transitions; an over-long transition is refused; a per-format profile applies CBR 10M to 1920x1080 and leaves portrait untouched; 6 rows on 3 workers all render valid outputs.
 - `smoke_mode2.py`: static repiquage (two stores, verified visually and by output divergence), real-time video capture (~3s), deterministic frame capture via the seek hook (2.0s), query injection, idempotent second run, missing template errors that row only; 5 variants across 3 concurrent browsers with a bad row contained.
 - CLI: `--dry-run`, `--csv`, `--force`, `--limit`, `--print-cron`, exit code 1 when any row errored. Daemon ticks, skips `once` jobs, survives a failing job.
@@ -308,3 +312,46 @@ stills, are filled with silence of the right length, because ffmpeg's concat
 filter refuses a stream count that varies between segments. Transitions
 cross-fade the audio to match. A browser capture carries no audio at all, which
 is what the `audio_track` column is for.
+
+
+---
+
+## 12. Schema validation (P10)
+
+Every channel's tag is validated against the **official IAB VAST 4.2 XSD**,
+vendored in `tests/schemas/` so `tests/test_vast_schema.py` runs offline. A
+validation suite that needs the network is one that gets skipped.
+
+Until P10 the tags were only well-formed, and that was documented as a caveat
+rather than checked. Checking it cost one fetch and one `xmllint`, and turned up
+four defects:
+
+| | The schema wants | What was emitted |
+|---|---|---|
+| namespace | `xmlns="http://www.iab.com/VAST"` | none, plus an explicit `noNamespaceSchemaLocation` |
+| `InLine` | AdSystem, Error, Impression, **AdServingId, AdTitle** | AdTitle right after AdSystem |
+| `Creative` | **Linear, then UniversalAdId** | the reverse |
+| `Linear` | **TrackingEvents, then Duration** | the reverse |
+| `VideoClicks` | **ClickTracking, then ClickThrough** | the reverse |
+
+Plus `Impression` is `minOccurs=1`: it is now emitted even when nothing is
+configured, because an ad with no impression node is not a VAST document.
+
+Three of those orderings are not the intuitive ones. They were read off IAB's own
+`Inline_Simple.xml` sample after confirming it validates with the same toolchain,
+then confirmed by bisection with `xmllint` for the case the sample did not cover.
+No test that only checks "the XML parses" would have caught any of them.
+
+### The one gap left open on purpose
+
+`Impression` and `Error` are typed `xs:anyURI`, which forbids square brackets, so
+a URL carrying `[CACHEBUSTING]` or `[ERRORCODE]` can never validate. Those macros
+are mandated by the VAST spec itself and every ad server emits them: the XSD is
+stricter than the standard it encodes, and IAB's own sample contains no macro at
+all. The macros stay, and a test pins that a macro'd tag fails on that type and
+on nothing else, so nobody "fixes" it by dropping them.
+
+### Still not proven
+
+Schema conformance is not acceptance. A pass through the IAB VAST Validator
+service, and playback in a real player on real inventory, remain to be done.

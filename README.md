@@ -123,7 +123,7 @@ python tests/smoke_mode1.py   # real ffmpeg stitch + idempotency contract
 python tests/smoke_mode2.py   # real Chromium capture, all three capture modes
 ```
 
-141 offline tests, including VAST schema validation per channel. Known gaps are
+146 offline tests, including VAST schema validation per channel. Known gaps are
 listed in [`docs/PRODUCT.md` §13](docs/PRODUCT.md).
 
 ## Encoding
@@ -166,10 +166,11 @@ a macro'd URL is deliberately not schema-valid.
 
 ## Status
 
-P0-P7 done and tested end-to-end: both modes, idempotency by input hash,
+P0-P11 done and tested end-to-end: both modes, idempotency by input hash,
 scheduling (cron + daemon), xfade transitions, per-format encoding profiles,
 retries on transient Sheets failures, concurrent rendering, multi-rendition
-delivery with VAST 4.2, the three-tab DCO sheet model, and the radio channel.
+delivery with VAST 4.2 validated against the official IAB XSD, the three-tab DCO
+sheet model with combination expansion, and the radio channel.
 
 **Not yet verified: the live Google Sheet path.** There is no service account on
 the build machine, so `open_worksheet` / `read_rows` / `make_write_back` have

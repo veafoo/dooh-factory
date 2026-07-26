@@ -477,7 +477,7 @@ it invalidates exactly the rows it affects.
 ## 12. Testing
 
 ```bash
-pytest tests -q               # 115 offline tests: no ffmpeg, no browser, no credentials
+pytest tests -q               # 146 offline tests: no ffmpeg, no browser, no credentials
 python tests/smoke_mode1.py   # real FFmpeg: stitching, transitions, profiles, idempotency
 python tests/smoke_mode2.py   # real Chromium: all capture modes, concurrency
 ```
