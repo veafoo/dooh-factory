@@ -118,11 +118,13 @@ reference creative that supports all four injection modes and the seek hook.
 
 ```
 pytest tests -q               # offline: no ffmpeg, no browser, no credentials
+pytest tests/test_vast_schema.py -q   # tags vs the official IAB VAST 4.2 XSD
 python tests/smoke_mode1.py   # real ffmpeg stitch + idempotency contract
 python tests/smoke_mode2.py   # real Chromium capture, all three capture modes
 ```
 
-115 offline tests. Known gaps are listed in [`docs/PRODUCT.md` §13](docs/PRODUCT.md).
+141 offline tests, including VAST schema validation per channel. Known gaps are
+listed in [`docs/PRODUCT.md` §13](docs/PRODUCT.md).
 
 ## Encoding
 
@@ -156,8 +158,11 @@ The ladders in `config.example.yml` are conventional starting points, not a
 quotation of a specific IAB document. Every network publishes its own ingest
 spec and that spec wins.
 
-See [`docs/PRODUCT.md` §6](docs/PRODUCT.md) for why the tag carries an `<Error>`
-with `[ERRORCODE]`, a `<Mezzanine>` on CTV, and no `<VideoClicks>` on DOOH.
+Every channel's tag is validated against the **official IAB VAST 4.2 XSD**
+(vendored in `tests/schemas/`, so the suite runs offline). See
+[`docs/PRODUCT.md` §6](docs/PRODUCT.md) for why the tag carries an `<Error>`
+with `[ERRORCODE]`, a `<Mezzanine>` on CTV, no `<VideoClicks>` on DOOH, and why
+a macro'd URL is deliberately not schema-valid.
 
 ## Status
 

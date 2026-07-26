@@ -277,16 +277,37 @@ full quartile set.
 
 ### Validating a tag
 
+Every channel's tag is validated against the **official IAB VAST 4.2 XSD** in
+`tests/test_vast_schema.py`. The schema is vendored in `tests/schemas/` so the
+suite runs offline.
+
 ```bash
-xmllint --noout output/spot.vast.xml                        # well-formed
-xmllint --xpath 'count(//MediaFile)' output/spot.vast.xml    # renditions present
-xmllint --schema vast4.xsd output/spot.vast.xml --noout      # bring your own XSD
+pytest tests/test_vast_schema.py -q
+xmllint --noout --schema tests/schemas/vast_4.2.xsd output/spot.vast.xml
 ```
 
-**Not yet done:** validation against the official IAB XSD, and a pass through the
-IAB VAST Validator. The generator follows the documented InLine element order and
-every tag it produces is well-formed and passes the xpath assertions above, but
-"well-formed" is not "schema-valid". Do this before trafficking anything real.
+Getting there found four defects that "well-formed" had hidden, three of them
+orderings that are not the intuitive ones:
+
+| | The schema wants |
+|---|---|
+| namespace | `xmlns="http://www.iab.com/VAST"`, mandatory |
+| `InLine` | AdSystem, Error, Impression, **AdServingId, AdTitle**, ..., Creatives |
+| `Creative` | **Linear, then UniversalAdId** |
+| `Linear` | **TrackingEvents, then Duration**, MediaFiles, VideoClicks |
+| `VideoClicks` | **ClickTracking, then ClickThrough** |
+| `Impression` | `minOccurs=1`: emitted even when empty |
+
+**One deliberate gap.** `Impression` and `Error` are typed `xs:anyURI`, which
+forbids square brackets, so a URL carrying `[CACHEBUSTING]` or `[ERRORCODE]` can
+never validate. Those macros are mandated by the VAST spec itself and every ad
+server emits them, so they stay: the XSD is stricter than the standard it
+encodes. A tag with macros fails validation on that type and on nothing else,
+which is pinned by a test. Configure macro-free URLs if you need a clean
+validator run.
+
+**Still not done:** a pass through the IAB VAST Validator service, and playback
+in a real player.
 
 ---
 
@@ -476,8 +497,10 @@ Honest list. None of these are hidden in a backlog somewhere else.
    account on the build machine. Row parsing and write-back buffering are
    unit-tested against raw values; the network round-trip is not. **This is the
    first thing to verify.**
-2. **No IAB XSD validation.** Tags are well-formed and structurally checked; they
-   have not been run through the official validator.
+2. **No pass through the IAB VAST Validator service, and no real player test.**
+   Tags do validate against the official IAB VAST 4.2 XSD (vendored, tested per
+   channel), with the documented `anyURI`/macro exception. That is schema
+   conformance, not proof a given SSP will accept and play them.
 3. **DV360 SDF export is not implemented.** The `media_dv360` tab is a *planning*
    tab built on DV360 concepts. SDF headers are version-specific (v7, v8, …) and
    must be taken from the SDF template your own DV360 instance exports. They

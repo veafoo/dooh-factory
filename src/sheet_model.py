@@ -95,7 +95,7 @@ MEDIA_HEADER = [
 
 DROPDOWNS = {
     "status": ["pending", "done", "error"],
-    "channel": ["dooh", "ctv", "mobile", "web"],
+    "channel": ["dooh", "ctv", "mobile", "radio", "web"],
     "format": ["1080x1920", "1920x1080", "3840x2160", "2160x3840", "1080x1080",
                "1280x720", "640x360"],
     "transition": ["fade", "dissolve", "wipeleft", "wiperight",
@@ -106,13 +106,12 @@ DROPDOWNS = {
     "creative_tab": ["mode1", "mode2"],
     "creative_type": ["video", "audio", "display", "native"],
     "line_item_type": ["Display", "Video", "Audio", "Digital out of home"],
-    "environment": ["dooh", "ctv", "mobile_app", "mobile_web", "desktop"],
+    "environment": ["dooh", "ctv", "mobile_app", "mobile_web", "desktop", "audio"],
     "budget_type": ["Amount", "Impressions"],
     "pacing": ["Flight", "Daily"],
     "pacing_rate": ["ASAP", "Even", "Ahead"],
     "bid_strategy": ["Fixed", "Maximize conversions", "Maximize viewable impressions",
                      "Beat the deal"],
-    "creative_source_col": ["hosted", "third_party"],
 }
 
 WIDTHS = {
@@ -191,10 +190,32 @@ MODE2_EXAMPLES = [
 
 # The media tab pulls the rendered asset straight from the creative tab, so a
 # trader never copies a path by hand and a re-render is picked up automatically.
-_VAST_LOOKUP = ('=IFERROR(VLOOKUP($AH{r},INDIRECT("\'"&$AG{r}&"\'!A:ZZ"),'
-                'MATCH("vast_path",INDIRECT("\'"&$AG{r}&"\'!A1:ZZ1"),0),FALSE),"")')
-_ASSET_LOOKUP = ('=IFERROR(VLOOKUP($AH{r},INDIRECT("\'"&$AG{r}&"\'!A:ZZ"),'
-                 'MATCH("renditions",INDIRECT("\'"&$AG{r}&"\'!A1:ZZ1"),0),FALSE),"")')
+#
+# The column letters are DERIVED, never written by hand: the lookup is wrapped in
+# IFERROR, so a wrong reference returns an empty cell instead of an error and the
+# trader ships a line item with no creative. Hardcoding them cost exactly that
+# bug once already.
+
+def _col_letter(index: int) -> str:
+    """0-based column index -> spreadsheet letter (0 -> A, 28 -> AC)."""
+    letter = ""
+    index += 1
+    while index:
+        index, rem = divmod(index - 1, 26)
+        letter = chr(65 + rem) + letter
+    return letter
+
+
+def _lookup(target: str) -> str:
+    """VLOOKUP of `target` on the creative tab named by this row."""
+    tab = "$" + _col_letter(MEDIA_HEADER.index("creative_tab")) + "{r}"
+    key = "$" + _col_letter(MEDIA_HEADER.index("creative_id")) + "{r}"
+    return (f'=IFERROR(VLOOKUP({key},INDIRECT("\'"&{tab}&"\'!A:ZZ"),'
+            f'MATCH("{target}",INDIRECT("\'"&{tab}&"\'!A1:ZZ1"),0),FALSE),"")')
+
+
+_VAST_LOOKUP = _lookup("vast_path")
+_ASSET_LOOKUP = _lookup("renditions")
 
 
 def media_examples() -> list[list[str]]:

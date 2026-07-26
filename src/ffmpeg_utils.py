@@ -183,7 +183,9 @@ def effective_durations(
         if is_image(clip):
             out.append(float(dur or still_duration))
         else:
-            actual = probe(clip, ffprobe_bin)["duration"]
+            # probe_duration, not probe: an audio rush has no video stream, and
+            # the length is all this needs either way.
+            actual = probe_duration(clip, ffprobe_bin)
             out.append(min(float(dur), actual) if dur else actual)
     return out
 

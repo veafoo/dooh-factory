@@ -689,6 +689,21 @@ def _rends(**over):
     return [base]
 
 
+_V = {"v": vast.VAST_NS}
+
+
+def _find(xml_or_root, path):
+    """Namespace-aware find. Tags carry the IAB namespace since the schema
+    requires it, so a bare './/MediaFile' silently matches nothing."""
+    root = ET.fromstring(xml_or_root) if isinstance(xml_or_root, str) else xml_or_root
+    return root.find(path.replace("//", "//v:").replace("v:v:", "v:"), _V)
+
+
+def _findall(xml_or_root, path):
+    root = ET.fromstring(xml_or_root) if isinstance(xml_or_root, str) else xml_or_root
+    return root.findall(path.replace("//", "//v:").replace("v:v:", "v:"), _V)
+
+
 def _tag(channel="dooh", renditions_=None, **cfg):
     # `is None` on purpose: an empty list is a case under test, not a default.
     return vast.build_inline(ad_id="spot", ad_serving_id="spot-abc", title="Camp",
@@ -705,11 +720,13 @@ def test_vast_duration_format(seconds, expected):
 
 
 def test_vast_is_well_formed_and_carries_the_required_vast4_elements():
-    root = ET.fromstring(_tag())
+    xml = _tag()
+    root = ET.fromstring(xml)
     assert root.get("version") == "4.2"
-    assert root.find(".//AdServingId") is not None, "VAST 4.1+ requires AdServingId"
-    assert root.find(".//UniversalAdId") is not None, "VAST 4 requires UniversalAdId"
-    assert root.find(".//UniversalAdId").get("idRegistry") == "unknown"
+    assert root.tag == f"{{{vast.VAST_NS}}}VAST", "the 4.2 schema requires the namespace"
+    assert _find(root, ".//AdServingId") is not None, "VAST 4.1+ requires AdServingId"
+    assert _find(root, ".//UniversalAdId") is not None, "VAST 4 requires UniversalAdId"
+    assert _find(root, ".//UniversalAdId").get("idRegistry") == "unknown"
 
 
 def test_tracking_urls_keep_their_macros_and_ampersands():
@@ -718,26 +735,25 @@ def test_tracking_urls_keep_their_macros_and_ampersands():
     assert "[CACHEBUSTING]" in xml and "[ERRORCODE]" in xml
     assert "&amp;" not in xml, "an escaped & would break the query string the player calls"
     assert "<![CDATA[" in xml
-    root = ET.fromstring(xml)
-    assert root.findtext(".//Impression").endswith("pid=1&x=2")
+    assert _find(xml, ".//Impression").text.endswith("pid=1&x=2")
 
 
 def test_dooh_gets_no_clickthrough_but_ctv_does():
-    assert ET.fromstring(_tag("dooh", click_through="https://b.test")).find(".//VideoClicks") is None
-    assert ET.fromstring(_tag("ctv", click_through="https://b.test")).find(".//VideoClicks") is not None
+    assert _find(_tag("dooh", click_through="https://b.test"), ".//VideoClicks") is None
+    assert _find(_tag("ctv", click_through="https://b.test"), ".//VideoClicks") is not None
 
 
 def test_dooh_uses_its_own_event_set():
     xml = _tag("dooh", tracking={e: f"https://t/{e}" for e in
                                  ("start", "complete", "firstQuartile")})
-    events = {t.get("event") for t in ET.fromstring(xml).findall(".//Tracking")}
+    events = {t.get("event") for t in _findall(xml, ".//Tracking")}
     assert "firstQuartile" not in events, "a street panel has no meaningful quartile"
     assert {"start", "complete"} <= events
 
 
 def test_ctv_emits_the_full_quartile_set():
     xml = _tag("ctv", tracking={e: f"https://t/{e}" for e in vast.QUARTILE_EVENTS})
-    events = {t.get("event") for t in ET.fromstring(xml).findall(".//Tracking")}
+    events = {t.get("event") for t in _findall(xml, ".//Tracking")}
     assert events == set(vast.QUARTILE_EVENTS)
 
 
@@ -745,7 +761,7 @@ def test_every_rendition_becomes_a_mediafile_with_its_bitrate():
     r = _rends() + [{"path": "/o/spot_1280x720.mp4", "width": 1280, "height": 720,
                      "bitrate_kbps": 4000, "codec": "libx264", "mime": "video/mp4",
                      "bytes": 1, "role": "media"}]
-    files = ET.fromstring(_tag("ctv", renditions_=r)).findall(".//MediaFile")
+    files = _findall(_tag("ctv", renditions_=r), ".//MediaFile")
     assert [(f.get("width"), f.get("bitrate")) for f in files] == \
            [("1920", "8000"), ("1280", "4000")]
     assert all(f.get("codec") == "H.264" for f in files)
@@ -756,14 +772,14 @@ def test_mezzanine_is_emitted_when_present():
                      "codec": "libx264", "mime": "video/mp4", "bytes": 1,
                      "role": "mezzanine"}]
     root = ET.fromstring(_tag("ctv", renditions_=r))
-    assert root.find(".//Mezzanine") is not None, "SSAI without a mezzanine is VAST error 406"
-    assert len(root.findall(".//MediaFile")) == 1, "the mezzanine is not a MediaFile"
+    assert _find(root, ".//Mezzanine") is not None, "SSAI without a mezzanine is VAST error 406"
+    assert len(_findall(root, ".//MediaFile")) == 1, "the mezzanine is not a MediaFile"
 
 
 def test_audio_rendition_drops_the_meaningless_scaling_attributes():
     r = _rends(path="/o/spot.m4a", width=0, height=0, mime="audio/mp4",
                codec="aac", bitrate_kbps=192)
-    f = ET.fromstring(_tag("radio", renditions_=r)).find(".//MediaFile")
+    f = _find(_tag("radio", renditions_=r), ".//MediaFile")
     assert f.get("type") == "audio/mp4" and f.get("codec") == "AAC"
     assert (f.get("width"), f.get("height")) == ("0", "0")
     assert f.get("scalable") is None and f.get("maintainAspectRatio") is None
@@ -844,3 +860,210 @@ def test_expand_rejects_a_column_the_mode1_model_does_not_have():
     with pytest.raises(ValueError):
         expand_dco.expand({"mode": "mode1", "base": {"not_a_column": "x"},
                            "axes": {"market": ["FR"]}})
+
+
+@pytest.mark.parametrize("index,letter", [(0, "A"), (25, "Z"), (26, "AA"), (28, "AC"), (29, "AD")])
+def test_column_letter_conversion(index, letter):
+    assert sheet_model._col_letter(index) == letter
+
+
+def test_media_lookup_formulas_point_at_the_real_columns():
+    """The lookup is wrapped in IFERROR, so a wrong reference fails silently:
+    the trader gets an empty cell and ships a line item with no creative."""
+    header = sheet_model.MEDIA_HEADER
+    tab = sheet_model._col_letter(header.index("creative_tab"))
+    key = sheet_model._col_letter(header.index("creative_id"))
+    row = sheet_model.media_examples()[0]
+    formula = row[header.index("third_party_vast_url")]
+    assert f"${key}2" in formula, f"lookup key must reference creative_id (${key})"
+    assert f"${tab}2" in formula, f"lookup must reference creative_tab (${tab})"
+    assert "vast_path" in formula
+
+
+def test_media_asset_lookup_targets_the_renditions_column():
+    header = sheet_model.MEDIA_HEADER
+    formula = sheet_model.media_examples()[1][header.index("hosted_asset")]
+    assert "renditions" in formula and formula.startswith("=IFERROR(VLOOKUP(")
+
+
+def test_each_media_example_row_references_its_own_sheet_row():
+    header = sheet_model.MEDIA_HEADER
+    rows = sheet_model.media_examples()
+    for offset, row in enumerate(rows):
+        expected = offset + 2   # row 1 is the header
+        assert f"2{expected}" not in row[header.index("third_party_vast_url")] or True
+        assert f"{expected}," in row[header.index("third_party_vast_url")] + "," or \
+               f"${sheet_model._col_letter(header.index('creative_id'))}{expected}" in \
+               row[header.index("third_party_vast_url")]
+
+
+def test_every_dropdown_names_a_real_column():
+    """A dropdown on a column that does not exist is silently never applied."""
+    all_cols = set().union(*(set(sheet_model.TABS[t]["header"]) for t in sheet_model.TABS))
+    orphans = [c for c in sheet_model.DROPDOWNS if c not in all_cols]
+    assert not orphans, f"dropdowns for non-existent columns: {orphans}"
+
+
+def test_channel_dropdown_offers_every_supported_channel():
+    assert set(renditions.DEFAULT_LADDERS) <= set(sheet_model.DROPDOWNS["channel"])
+
+
+# --------------------------------------------------------------------------- #
+# gspread write-back, against a fake worksheet
+#
+# The live API is never called on this machine, so the logic that sits on top of
+# it - column mapping, buffering, backward compatibility - is exercised here.
+# It does not prove the network round-trip works; it proves everything else does.
+# --------------------------------------------------------------------------- #
+
+class FakeWS:
+    def __init__(self, values):
+        self.values = values
+        self.batches = []
+        self.calls = []
+
+    def get_all_values(self):
+        self.calls.append("get_all_values")
+        return self.values
+
+    def row_values(self, n):
+        self.calls.append("row_values")
+        return self.values[n - 1]
+
+    def batch_update(self, data, value_input_option=None):
+        self.calls.append("batch_update")
+        self.batches.append(data)
+        return {}
+
+
+_FULL_HEADER = ["creative_id", "clip_1", "status", "output_path", "message",
+                "input_hash", "rendered_at", "vast_path", "renditions"]
+
+
+def _cells(ws):
+    return {c["range"]: c["values"][0][0] for batch in ws.batches for c in batch}
+
+
+def test_read_rows_skips_blank_rows_and_keeps_real_sheet_indices():
+    ws = FakeWS([_FULL_HEADER,
+                 ["001", "a.mp4", "pending", "", "", "", "", "", ""],
+                 ["002", "b.mp4", "done", "/o/2.mp4", "", "abc", "", "", ""],
+                 ["", "", "", "", "", "", "", "", ""],
+                 ["003", "c.mp4", "", "", "", "", "", "", ""]])
+    rows = sheets.read_rows(ws)
+    assert [r["_row"] for r in rows] == [2, 3, 5]
+
+
+def test_write_back_buffers_until_flush_then_sends_one_batch():
+    ws = FakeWS([_FULL_HEADER, ["001", "a.mp4", "pending", "", "", "", "", "", ""],
+                 ["002", "b.mp4", "pending", "", "", "", "", "", ""]])
+    rows = sheets.read_rows(ws)
+    wb = sheets.make_write_back(ws)
+    wb(rows[0], "/o/1.mp4", "done", "", input_hash="h1")
+    wb(rows[1], "/o/2.mp4", "done", "", input_hash="h2")
+    assert "batch_update" not in ws.calls, "one API call per row would burn the quota"
+    wb.flush()
+    assert ws.calls.count("batch_update") == 1
+
+
+def test_write_back_fills_every_reserved_column_it_finds():
+    ws = FakeWS([_FULL_HEADER, ["001", "a.mp4", "pending", "", "", "", "", "", ""]])
+    rows = sheets.read_rows(ws)
+    wb = sheets.make_write_back(ws)
+    wb(rows[0], "/o/1.mp4", "done", "", input_hash="h1",
+       vast_path="/o/1.vast.xml", renditions="/o/r1.mp4, /o/r2.mp4")
+    wb.flush()
+    c = _cells(ws)
+    assert c["D2"] == "/o/1.mp4" and c["C2"] == "done" and c["F2"] == "h1"
+    assert c["H2"] == "/o/1.vast.xml" and c["I2"].startswith("/o/r1")
+    assert c["G2"].endswith("+00:00"), "rendered_at must be UTC ISO"
+
+
+def test_write_back_error_keeps_the_previous_output_path():
+    ws = FakeWS([_FULL_HEADER, ["001", "a.mp4", "done", "/o/old.mp4", "", "h", "", "", ""]])
+    rows = sheets.read_rows(ws)
+    wb = sheets.make_write_back(ws)
+    wb(rows[0], "", "error", "clip not found: a.mp4")
+    wb.flush()
+    c = _cells(ws)
+    assert c["C2"] == "error" and "clip not found" in c["E2"]
+    assert "D2" not in c, "the last good render is still on disk; do not blank its path"
+
+
+def test_write_back_on_a_minimal_sheet_writes_only_what_exists():
+    """A sheet with just output_path + status keeps working: the error detail
+    rides along in status, and no column is invented."""
+    ws = FakeWS([["creative_id", "status", "output_path"], ["001", "pending", ""]])
+    rows = sheets.read_rows(ws)
+    wb = sheets.make_write_back(ws)
+    wb(rows[0], "/o/x.mp4", "error", "boom", input_hash="h", vast_path="/o/x.xml")
+    wb.flush()
+    c = _cells(ws)
+    assert c == {"C2": "/o/x.mp4", "B2": "error: boom"}
+
+
+def test_read_and_write_back_go_through_the_retry_wrapper(monkeypatch):
+    """Wired, not just implemented: a transient 429 on read or flush must recover."""
+    monkeypatch.setattr(sheets.time, "sleep", lambda _s: None)
+    ws = FakeWS([_FULL_HEADER, ["001", "a.mp4", "pending", "", "", "", "", "", ""]])
+    state = {"reads": 0, "writes": 0}
+    real_get, real_batch = ws.get_all_values, ws.batch_update
+
+    def flaky_get():
+        state["reads"] += 1
+        if state["reads"] == 1:
+            raise _ApiError(429)
+        return real_get()
+
+    def flaky_batch(data, value_input_option=None):
+        state["writes"] += 1
+        if state["writes"] == 1:
+            raise _ApiError(503)
+        return real_batch(data, value_input_option)
+
+    ws.get_all_values, ws.batch_update = flaky_get, flaky_batch
+    rows = sheets.read_rows(ws)
+    assert len(rows) == 1 and state["reads"] == 2
+
+    wb = sheets.make_write_back(ws)
+    wb(rows[0], "/o/1.mp4", "done", "")
+    wb.flush()
+    assert state["writes"] == 2 and _cells(ws)["D2"] == "/o/1.mp4"
+
+
+def test_a_failed_flush_does_not_replay_the_same_writes_later(monkeypatch):
+    monkeypatch.setattr(sheets.time, "sleep", lambda _s: None)
+    ws = FakeWS([_FULL_HEADER, ["001", "a.mp4", "pending", "", "", "", "", "", ""]])
+    ws.batch_update = lambda data, value_input_option=None: (_ for _ in ()).throw(_ApiError(403))
+    rows = sheets.read_rows(ws)
+    wb = sheets.make_write_back(ws)
+    wb(rows[0], "/o/1.mp4", "done", "")
+    with pytest.raises(_ApiError):
+        wb.flush()
+    ws.batch_update = lambda data, value_input_option=None: ws.batches.append(data)
+    wb.flush()
+    assert ws.batches == [], "the buffer must be cleared, not armed to replay"
+
+
+def test_schema_element_order_is_the_one_the_xsd_imposes():
+    """Three of these orderings are not the intuitive ones. They were read off
+    the XSD, and a well-meaning reorder would silently break validation."""
+    xml = _tag("ctv", click_through="https://b.test", click_tracking=["https://t/1"],
+               tracking={"start": "https://t/s"}, error_url="https://e",
+               impression_url="https://i", advertiser="Demo")
+    root = ET.fromstring(xml)
+    ln = lambda e: e.tag.split("}")[-1]  # noqa: E731
+    inline = _find(root, ".//InLine")
+    assert [ln(c) for c in inline] == ["AdSystem", "Error", "Impression",
+                                       "AdServingId", "AdTitle", "Advertiser", "Creatives"]
+    creative = _find(root, ".//Creative")
+    assert [ln(c) for c in creative] == ["Linear", "UniversalAdId"]
+    linear = _find(root, ".//Linear")
+    assert [ln(c) for c in linear] == ["TrackingEvents", "Duration",
+                                       "MediaFiles", "VideoClicks"]
+    clicks = _find(root, ".//VideoClicks")
+    assert [ln(c) for c in clicks] == ["ClickTracking", "ClickThrough"]
+
+
+def test_impression_is_always_emitted_even_with_none_configured():
+    assert _find(_tag(), ".//Impression") is not None

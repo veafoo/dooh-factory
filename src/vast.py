@@ -4,9 +4,27 @@ The factory renders the assets; this is what a buyer actually traffics. One
 creative becomes one InLine tag carrying every rendition as a `<MediaFile>`, so
 the player picks what it can decode at the bandwidth it has.
 
-Element order follows the VAST 4.x InLine sequence - AdSystem, AdTitle, Error,
-Impression, AdServingId, Creatives - because the schema is ordered and a player
-validating against the XSD rejects a shuffled tag with error 101.
+Every tag is validated against the official IAB VAST 4.2 XSD in the test suite.
+The schema is ordered, and several of its orderings are not the intuitive ones,
+so they were determined from the schema rather than guessed:
+
+    InLine        AdSystem, Error, Impression, AdServingId, AdTitle, ..., Creatives
+    Creative      Linear, then UniversalAdId
+    Linear        TrackingEvents, then Duration, then MediaFiles, then VideoClicks
+    VideoClicks   ClickTracking, then ClickThrough
+    MediaFiles    MediaFile+, then Mezzanine
+
+The document also carries the `http://www.iab.com/VAST` namespace: the 4.2 XSD
+declares a targetNamespace, so a tag without it has no matching global
+declaration and fails at the root. Players are lenient about this; the schema
+is not.
+
+One thing the schema cannot express: `Impression` and `Error` are typed
+`xs:anyURI`, which forbids square brackets, so a URL carrying `[CACHEBUSTING]`
+or `[ERRORCODE]` is never schema-valid. The macros are mandated by the VAST
+spec itself and every ad server emits them, so they stay - the XSD is simply
+stricter than the standard it encodes. The validation tests use macro-free URLs
+and that gap is deliberate.
 
 Deliberate choices, each one a known failure mode if skipped:
 
@@ -40,6 +58,14 @@ from xml.dom import minidom
 log = logging.getLogger("dooh.vast")
 
 VAST_VERSION = "4.2"
+# The 4.2 XSD declares targetNamespace with elementFormDefault="qualified", so a
+# tag without this namespace has no matching global declaration and fails at the
+# root. Real players are lenient about it; the schema is not.
+VAST_NS = "http://www.iab.com/VAST"
+
+
+def _q(tag: str) -> str:
+    return f"{{{VAST_NS}}}{tag}"
 
 # Counting events. DOOH panels have no meaningful quartile playback pattern, so
 # the channel decides which of these are worth emitting.
@@ -67,7 +93,7 @@ def asset_url(path: str, base_url: str) -> str:
 
 
 def _cdata(parent: ET.Element, tag: str, url: str, **attrs) -> ET.Element:
-    el = ET.SubElement(parent, tag, {k: str(v) for k, v in attrs.items() if v not in (None, "")})
+    el = ET.SubElement(parent, _q(tag), {k: str(v) for k, v in attrs.items() if v not in (None, "")})
     el.text = url
     return el
 
@@ -93,45 +119,50 @@ def build_inline(
     if not media:
         raise ValueError("a VAST tag needs at least one non-mezzanine rendition")
 
-    root = ET.Element("VAST", {
-        "version": cfg.get("version", VAST_VERSION),
-        "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
-        "xsi:noNamespaceSchemaLocation": "vast.xsd",
-    })
-    ad = ET.SubElement(root, "Ad", {"id": ad_id, "conditionalAd": "false"})
-    inline = ET.SubElement(ad, "InLine")
+    ET.register_namespace("", VAST_NS)
+    root = ET.Element(_q("VAST"), {"version": cfg.get("version", VAST_VERSION)})
+    ad = ET.SubElement(root, _q("Ad"), {"id": ad_id, "conditionalAd": "false"})
+    inline = ET.SubElement(ad, _q("InLine"))
 
-    ET.SubElement(inline, "AdSystem", {"version": "1.0"}).text = \
+    # The XSD sequence is ordered and xmllint rejects any other arrangement:
+    # AdSystem, Error, Impression, AdServingId, AdTitle, ..., Creatives.
+    # Verified against the IAB VAST 4.2 XSD and their own Inline_Simple sample.
+    ET.SubElement(inline, _q("AdSystem"), {"version": "1.0"}).text = \
         cfg.get("ad_system", "dooh-factory")
-    ET.SubElement(inline, "AdTitle").text = title
 
     if cfg.get("error_url"):
         _cdata(inline, "Error", cfg["error_url"])
-    for i, url in enumerate(_as_list(cfg.get("impression_url")), start=1):
+    # Impression is minOccurs=1 in the schema. With none configured the element
+    # still has to be there, empty: an ad with no impression node is not a VAST
+    # document at all.
+    impressions = _as_list(cfg.get("impression_url")) or [""]
+    for i, url in enumerate(impressions, start=1):
         _cdata(inline, "Impression", url, id=f"imp-{i}")
 
-    ET.SubElement(inline, "AdServingId").text = ad_serving_id
+    ET.SubElement(inline, _q("AdServingId")).text = ad_serving_id
+    ET.SubElement(inline, _q("AdTitle")).text = title
 
     if cfg.get("advertiser"):
-        ET.SubElement(inline, "Advertiser").text = cfg["advertiser"]
+        ET.SubElement(inline, _q("Advertiser")).text = cfg["advertiser"]
 
-    creatives = ET.SubElement(inline, "Creatives")
-    creative = ET.SubElement(creatives, "Creative", {"id": ad_id, "sequence": "1"})
-    ET.SubElement(creative, "UniversalAdId",
-                  {"idRegistry": cfg.get("id_registry", "unknown")}).text = ad_id
+    creatives = ET.SubElement(inline, _q("Creatives"))
+    creative = ET.SubElement(creatives, _q("Creative"), {"id": ad_id, "sequence": "1"})
 
-    linear = ET.SubElement(creative, "Linear")
-    ET.SubElement(linear, "Duration").text = duration_hms(duration_s)
+    # Linear before UniversalAdId, again because the sequence is ordered.
+    linear = ET.SubElement(creative, _q("Linear"))
 
+    # And inside Linear: TrackingEvents before Duration.
     events = DOOH_EVENTS if channel == "dooh" else QUARTILE_EVENTS
     tracking_cfg = cfg.get("tracking") or {}
     tracked = {e: tracking_cfg[e] for e in events if tracking_cfg.get(e)}
     if tracked:
-        te = ET.SubElement(linear, "TrackingEvents")
+        te = ET.SubElement(linear, _q("TrackingEvents"))
         for event, url in tracked.items():
             _cdata(te, "Tracking", url, event=event)
 
-    files = ET.SubElement(linear, "MediaFiles")
+    ET.SubElement(linear, _q("Duration")).text = duration_hms(duration_s)
+
+    files = ET.SubElement(linear, _q("MediaFiles"))
     for i, r in enumerate(media, start=1):
         mime = r.get("mime", "video/mp4")
         attrs = {
@@ -162,10 +193,15 @@ def build_inline(
     # OOH has no click surface; advertising one distorts click reporting.
     click_through = cfg.get("click_through")
     if click_through and channel != "dooh":
-        clicks = ET.SubElement(linear, "VideoClicks")
-        _cdata(clicks, "ClickThrough", click_through, id="ct-1")
+        clicks = ET.SubElement(linear, _q("VideoClicks"))
+        # ClickTracking before ClickThrough: counter-intuitive, but that is the
+        # order the 4.2 schema imposes. Verified empirically against the XSD.
         for i, url in enumerate(_as_list(cfg.get("click_tracking")), start=1):
             _cdata(clicks, "ClickTracking", url, id=f"ctrk-{i}")
+        _cdata(clicks, "ClickThrough", click_through, id="ct-1")
+
+    ET.SubElement(creative, _q("UniversalAdId"),
+                  {"idRegistry": cfg.get("id_registry", "unknown")}).text = ad_id
 
     xml = ET.tostring(root, encoding="unicode")
     pretty = minidom.parseString(xml).toprettyxml(indent="  ")
