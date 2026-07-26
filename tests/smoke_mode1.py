@@ -120,6 +120,61 @@ def main() -> int:
     assert (s4.errors, s4.rendered) == (1, 0), f"missing asset should error the row: {s4}"
     print("OK -> missing rush reported per-row")
 
+    # transitions: each xfade overlaps two clips, so the total shrinks by
+    # (n-1) * transition_dur against the same hard-cut sequence
+    cut = build_rows()
+    cut[0].update(naming_template="cut", status="pending", input_hash="")
+    run_batch(cut)
+    cut_len = ffmpeg_utils.probe(cut[0]["output_path"])["duration"]
+
+    xf = build_rows()
+    xf[0].update(naming_template="xfade", transition="fade", transition_dur="0.5",
+                 status="pending", input_hash="")
+    run_batch(xf)
+    xf_len = ffmpeg_utils.probe(xf[0]["output_path"])["duration"]
+    expected = cut_len - 3 * 0.5  # 4 clips -> 3 transitions
+    assert abs(xf_len - expected) < 0.15, f"xfade: got {xf_len:.2f}s, expected {expected:.2f}s"
+    print(f"OK -> xfade: {cut_len:.1f}s hard cut -> {xf_len:.1f}s crossfaded")
+
+    # a transition longer than the shortest clip would produce garbage
+    over = build_rows()
+    over[0].update(naming_template="over", transition="fade", transition_dur="9",
+                   status="pending", input_hash="")
+    s5 = run_batch(over)
+    assert s5.errors == 1, "an over-long transition must be refused, not rendered"
+    print("OK -> over-long transition refused")
+
+    # per-format ingest profile switches rate control for that format only
+    CFG["ffmpeg"]["profiles"] = {"1920x1080": {"bitrate": "10M", "gop": 50}}
+    try:
+        land = build_rows()
+        land[0].update(format="1920x1080", naming_template="landscape",
+                       status="pending", input_hash="")
+        plan = mode1_stitch.prepare(land[0], CFG, {})
+        assert plan["encoding"]["bitrate"] == "10M" and plan["encoding"]["gop"] == 50
+        assert run_batch(land).rendered == 1
+        info = ffmpeg_utils.probe(land[0]["output_path"])
+        assert (info["width"], info["height"]) == (1920, 1080)
+        # portrait creatives must be untouched by the landscape profile
+        assert "bitrate" not in mode1_stitch.prepare(build_rows()[0], CFG, {})["encoding"]
+        print("OK -> per-format profile applied (CBR 10M) and scoped to its format")
+    finally:
+        CFG["ffmpeg"].pop("profiles")
+
+    # concurrency must not lose, duplicate or corrupt rows
+    many = []
+    for i in range(6):
+        r = build_rows()[0]
+        r.update(creative_id=f"p{i}", naming_template=f"par_{i}", _row=i + 10,
+                 status="pending", input_hash="", output_path="")
+        many.append(r)
+    s6 = run_batch(many, workers=3)
+    assert (s6.rendered, s6.errors) == (6, 0), f"parallel run: {s6}"
+    assert len({r["output_path"] for r in many}) == 6
+    for r in many:
+        assert ffmpeg_utils.probe(r["output_path"])["duration"] > 0
+    print("OK -> 6 rows rendered on 3 workers, all outputs valid")
+
     print("PASS")
     return 0
 

@@ -10,6 +10,9 @@ Sheet contract (on top of the reserved columns in `contract.py`):
     format               'WxH', e.g. 1080x1920. Falls back to config.
     max_duration_s       optional hard cap on the finished creative.
     still_duration_s     optional default hold for still images in this row.
+    transition           optional ffmpeg xfade name (fade, wipeleft, dissolve,
+                         circleopen...). Empty = hard cut.
+    transition_dur       optional cross-fade length, seconds.
 
 Stills (jpg/png) are first-class rushes - a lot of DOOH sequences are a still
 endframe after two video shots.
@@ -91,13 +94,24 @@ def prepare(row: dict, cfg: dict, job: dict | None = None) -> dict:
     still = (_num(row.get("still_duration_s"), None) or _num(job.get("still_duration_s"), None)
              or _num(ff.get("still_duration_s"), 4.0))
 
+    # Per-format ingest spec, if this screen format declares one.
+    enc = contract.encoding_for(ff, width, height)
+
+    transition = str(row.get("transition", "") or job.get("transition", "") or "").strip().lower()
+    trans_dur = (_num(row.get("transition_dur"), None) or _num(job.get("transition_dur"), None)
+                 or _num(ff.get("transition_duration_s"), 0.5))
+    # Transitions need real clip lengths to lay out the xfade offsets, which
+    # costs one ffprobe per clip - so only pay for it when they are requested.
+    clip_lengths = (ffmpeg_utils.effective_durations(
+        clips, durations, still, enc.get("ffprobe_bin", "ffprobe")) if transition else None)
+
     stem = contract.output_stem(row, job.get("naming_fallback", "{creative_id}"))
     # The render spec is part of the fingerprint: change the codec or the
     # target format in config and every done row correctly goes stale.
     spec = "|".join(str(x) for x in [
-        width, height, fps, max_duration, still,
-        ff.get("video_codec"), ff.get("crf"), ff.get("bitrate"),
-        ff.get("profile"), ff.get("level"), ff.get("gop"), ff.get("pix_fmt"),
+        width, height, fps, max_duration, still, transition, trans_dur,
+        enc.get("video_codec"), enc.get("crf"), enc.get("bitrate"), enc.get("maxrate"),
+        enc.get("profile"), enc.get("level"), enc.get("gop"), enc.get("pix_fmt"),
     ])
     return {
         "stem": stem,
@@ -105,11 +119,15 @@ def prepare(row: dict, cfg: dict, job: dict | None = None) -> dict:
         "hash": contract.compute_input_hash(row, clips, spec),
         "clips": clips,
         "durations": durations,
+        "clip_lengths": clip_lengths,
         "width": width,
         "height": height,
         "fps": fps,
         "max_duration": max_duration,
         "still_duration": still,
+        "transition": transition or None,
+        "transition_duration": trans_dur,
+        "encoding": enc,
         "dst": os.path.join(paths["output_dir"], f"{stem}.mp4"),
     }
 
@@ -120,8 +138,10 @@ def render(plan: dict, cfg: dict, job: dict | None = None) -> str:
     ffmpeg_utils.concat_normalized(
         plan["clips"], plan["dst"],
         width=plan["width"], height=plan["height"], fps=plan["fps"],
-        ff=cfg.get("ffmpeg", {}), durations=plan["durations"],
+        ff=plan["encoding"], durations=plan["durations"],
         still_duration=plan["still_duration"], max_duration=plan["max_duration"],
+        transition=plan["transition"], transition_duration=plan["transition_duration"],
+        clip_durations=plan["clip_lengths"],
     )
     return plan["dst"]
 

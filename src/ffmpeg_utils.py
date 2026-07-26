@@ -136,6 +136,48 @@ def _norm_chain(idx: int, w: int, h: int, fps: int) -> str:
 # operations
 # --------------------------------------------------------------------------- #
 
+def effective_durations(
+    clips: list[str], durations: list[float | None], still_duration: float,
+    ffprobe_bin: str = "ffprobe",
+) -> list[float]:
+    """Actual on-timeline length of each clip, after trimming and image looping.
+
+    Costs one ffprobe per video, so it is only called when something needs real
+    durations - laying out transitions.
+    """
+    out = []
+    for clip, dur in zip(clips, durations):
+        if is_image(clip):
+            out.append(float(dur or still_duration))
+        else:
+            actual = probe(clip, ffprobe_bin)["duration"]
+            out.append(min(float(dur), actual) if dur else actual)
+    return out
+
+
+def _xfade_chain(n: int, clip_durations: list[float], transition: str, d: float) -> tuple[str, str]:
+    """Cross-fade chain over the normalized inputs -> (filter, final label).
+
+    Each xfade starts `d` seconds before the running output ends, so the total
+    is sum(durations) - (n-1) * d.
+    """
+    if len(clip_durations) != n:
+        raise ValueError("clip_durations must be parallel to clips")
+    shortest = min(clip_durations)
+    if d >= shortest:
+        raise ValueError(
+            f"transition duration {d}s must be shorter than the shortest clip ({shortest:.2f}s)")
+
+    parts, prev, acc = [], "v0", clip_durations[0]
+    for k in range(1, n):
+        label = f"x{k}"
+        parts.append(f"[{prev}][v{k}]xfade=transition={transition}:"
+                     f"duration={d}:offset={acc - d:.4f}[{label}]")
+        acc += clip_durations[k] - d
+        prev = label
+    return ";".join(parts), prev
+
+
 def concat_normalized(
     clips: list[str],
     dst: str,
@@ -147,13 +189,20 @@ def concat_normalized(
     durations: list[float | None] | None = None,
     still_duration: float = 4.0,
     max_duration: float | None = None,
+    transition: str | None = None,
+    transition_duration: float = 0.5,
+    clip_durations: list[float] | None = None,
 ) -> None:
     """Stitch heterogeneous clips into one DOOH creative in a single pass.
 
     Each input is scaled/padded to WxH, SAR normalized and fps-locked, then
-    concatenated. Still images are looped for `durations[i]` (or
-    `still_duration`) seconds. Videos are trimmed at the input when a duration
-    is given. Audio is dropped - public screens are muted.
+    joined. Still images are looped for `durations[i]` (or `still_duration`)
+    seconds. Videos are trimmed at the input when a duration is given. Audio is
+    dropped - public screens are muted.
+
+    With `transition` set (any ffmpeg xfade name: fade, wipeleft, dissolve...)
+    clips cross-fade instead of hard-cutting; `clip_durations` is then required
+    to lay out the offsets - see `effective_durations`.
     """
     if not clips:
         raise ValueError("no clips to concat")
@@ -171,10 +220,17 @@ def concat_normalized(
         cmd += ["-i", clip]
 
     chains = [_norm_chain(i, width, height, fps) for i in range(len(clips))]
-    labels = "".join(f"[v{i}]" for i in range(len(clips)))
-    filt = ";".join(chains) + f";{labels}concat=n={len(clips)}:v=1:a=0[out]"
-
-    cmd += ["-filter_complex", filt, "-map", "[out]"]
+    if transition and len(clips) > 1:
+        if not clip_durations:
+            raise ValueError("transitions need clip_durations")
+        xfade, out_label = _xfade_chain(len(clips), clip_durations,
+                                        transition, transition_duration)
+        filt = ";".join(chains) + ";" + xfade
+        cmd += ["-filter_complex", filt, "-map", f"[{out_label}]"]
+    else:
+        labels = "".join(f"[v{i}]" for i in range(len(clips)))
+        filt = ";".join(chains) + f";{labels}concat=n={len(clips)}:v=1:a=0[out]"
+        cmd += ["-filter_complex", filt, "-map", "[out]"]
     cmd += video_args(ff)
     cmd += ["-an"]
     if max_duration:

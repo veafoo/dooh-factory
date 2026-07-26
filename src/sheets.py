@@ -15,10 +15,46 @@ Two things matter operationally here:
 from __future__ import annotations
 
 import logging
+import random
+import time
 
 from . import contract
 
 log = logging.getLogger("dooh.sheets")
+
+# Sheets answers 429 on quota and 5xx on its own hiccups. Both are worth
+# retrying; a 403 (sheet not shared with the service account) is not, and
+# retrying it just delays the error the operator needs to see.
+RETRY_STATUS = (429, 500, 502, 503, 504)
+MAX_ATTEMPTS = 5
+
+
+def _is_transient(exc: Exception) -> bool:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in RETRY_STATUS:
+        return True
+    if status is not None:
+        return False
+    # No HTTP response at all: connection reset, DNS, timeout.
+    return isinstance(exc, (OSError, TimeoutError))
+
+
+def with_retry(fn, *args, what: str = "sheets call", attempts: int = MAX_ATTEMPTS, **kwargs):
+    """Call `fn`, retrying transient Sheets/network failures with backoff.
+
+    Exponential with jitter, so a batch of jobs hitting the quota at the same
+    minute does not retry in lockstep and hit it again together.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001 - re-raised below unless transient
+            if attempt == attempts or not _is_transient(e):
+                raise
+            delay = min(2 ** (attempt - 1), 16) * (1 + random.random() * 0.25)
+            log.warning("%s failed (%s), retry %d/%d in %.1fs",
+                        what, e.__class__.__name__, attempt, attempts - 1, delay)
+            time.sleep(delay)
 
 
 def open_worksheet(service_account_json: str, spreadsheet_id: str, worksheet: str):
@@ -26,7 +62,8 @@ def open_worksheet(service_account_json: str, spreadsheet_id: str, worksheet: st
     import gspread  # local import: keeps offline tests dependency-free
 
     gc = gspread.service_account(filename=service_account_json)
-    return gc.open_by_key(spreadsheet_id).worksheet(worksheet)
+    return with_retry(lambda: gc.open_by_key(spreadsheet_id).worksheet(worksheet),
+                      what="open worksheet")
 
 
 def parse_values(values: list[list[str]]) -> list[dict]:
@@ -55,7 +92,7 @@ def parse_values(values: list[list[str]]) -> list[dict]:
 
 def read_rows(ws) -> list[dict]:
     """All data rows as dicts keyed by header."""
-    return parse_values(ws.get_all_values())
+    return parse_values(with_retry(ws.get_all_values, what="read rows"))
 
 
 def make_write_back(ws, *, buffered: bool = True):
@@ -67,7 +104,7 @@ def make_write_back(ws, *, buffered: bool = True):
     """
     import gspread.utils as gu
 
-    header = [str(h).strip() for h in ws.row_values(1)]
+    header = [str(h).strip() for h in with_retry(ws.row_values, 1, what="read header")]
     col = {}
     for i, name in enumerate(header):
         if name and name not in col:
@@ -104,9 +141,12 @@ def make_write_back(ws, *, buffered: bool = True):
     def flush() -> None:
         if not pending:
             return
-        ws.batch_update(list(pending), value_input_option="RAW")
-        log.info("wrote back %d cell(s)", len(pending))
+        batch = list(pending)
+        # Clear first: a retried-then-failed flush must not leave the buffer
+        # armed to replay the same writes at the next flush.
         pending.clear()
+        with_retry(ws.batch_update, batch, value_input_option="RAW", what="write back")
+        log.info("wrote back %d cell(s)", len(batch))
 
     write_back.flush = flush  # type: ignore[attr-defined]
     return write_back

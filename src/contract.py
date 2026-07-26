@@ -94,6 +94,27 @@ def compute_input_hash(row: dict, files: list[str] | None = None, extra: str = "
     return h.hexdigest()[:16]
 
 
+def encoding_for(ff: dict, width: int, height: int) -> dict:
+    """Encoding config for one target format.
+
+    `ffmpeg.profiles` lets a screen format carry its own ingest spec - a 4K
+    landscape network asking for 20 Mbit CBR while portrait city panels stay on
+    CRF is the normal situation, not an edge case. A profile is merged over the
+    base block, so it only states what differs.
+
+        ffmpeg:
+          crf: 20
+          profiles:
+            "3840x2160": {bitrate: "20M", gop: 50}
+    """
+    profile = (ff.get("profiles") or {}).get(f"{width}x{height}")
+    if not profile:
+        return ff
+    merged = {k: v for k, v in ff.items() if k != "profiles"}
+    merged.update(profile)
+    return merged
+
+
 def status_of(row: dict) -> str:
     return str(row.get("status", "")).strip().lower()
 

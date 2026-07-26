@@ -225,12 +225,29 @@ Still open (do not block anything already built):
 - **P1 (Mode 1)** - done + tested: heterogeneous rushes and stills -> stitched DOOH creative, per-clip trim, duration cap, CMS-grade encoding params.
 - **P2 (Mode 2)** - done + tested: Playwright capture, 4 injection modes, 3 capture modes, one browser per batch.
 - **P3 (scheduling + idempotency)** - done + tested: cadence grammar with a minimum-interval floor, crontab generation, APScheduler daemon, input-hash idempotency, `--force` / `--dry-run` / `--limit` / `--csv`.
-- **P4 (hardening)** - remaining: live Sheet run (needs a service account), `xfade` transitions, remote asset fetch/push, retries on transient Sheets/network errors, parallel row rendering, per-format output profiles.
+- **P4 (hardening)** - done + tested: `xfade` transitions with offset layout and a guard against a transition longer than the shortest clip; per-format encoding profiles (`ffmpeg.profiles`); retries with jittered backoff on transient Sheets/network failures (429/5xx and connection errors, never on 403); concurrent rendering with a serial planning phase.
+  - **Still open:** the live Sheet run (needs a service account), and remote asset fetch/push, which is blocked on assumptions 6-7 above - the destination is a product decision, not a technical one.
+
+### Concurrency, measured (M1, 2026-07-26)
+
+| Workload | Serial | Parallel | Gain |
+|---|---|---|---|
+| Mode 2, 6 static captures | 3.9s | 2.1s (3 workers) | ~1.9x |
+| Mode 1, 8 stitched creatives | 7.0s | 6.8s (4 workers) | none |
+
+Mode 2 gains because each row is dominated by browser latency - page load and
+settle waits - leaving the CPU idle in between. Mode 1 does not: x264 already
+threads across every core, so concurrent encodes split the same CPU rather than
+adding throughput. `--workers` is a Mode 2 tool; Mode 1 stays at 1 unless the
+rushes are small enough that ffmpeg process startup dominates.
+
+Planning stays serial in both cases, so skip decisions, the name-collision guard
+and error messages are identical whatever the worker count.
 
 ### Verified (2026-07-26)
 
-- 65 offline unit tests pass (`pytest tests -q`).
-- `smoke_mode1.py`: 3 heterogeneous rushes + still endframe -> 1080x1920 @ 25fps, muted, H.264 High/4.1, duration cap honoured; second run skips; a rush changed on disk re-renders; `--force` re-renders; a missing rush errors that row only.
-- `smoke_mode2.py`: static repiquage (two stores, verified visually and by output divergence), real-time video capture (~3s), deterministic frame capture via the seek hook (2.0s), query injection, idempotent second run, missing template errors that row only.
+- 80 offline unit tests pass (`pytest tests -q`).
+- `smoke_mode1.py`: 3 heterogeneous rushes + still endframe -> 1080x1920 @ 25fps, muted, H.264 High/4.1, duration cap honoured; second run skips; a rush changed on disk re-renders; `--force` re-renders; a missing rush errors that row only; xfade shortens 9.0s to 7.5s across 3 transitions; an over-long transition is refused; a per-format profile applies CBR 10M to 1920x1080 and leaves portrait untouched; 6 rows on 3 workers all render valid outputs.
+- `smoke_mode2.py`: static repiquage (two stores, verified visually and by output divergence), real-time video capture (~3s), deterministic frame capture via the seek hook (2.0s), query injection, idempotent second run, missing template errors that row only; 5 variants across 3 concurrent browsers with a bad row contained.
 - CLI: `--dry-run`, `--csv`, `--force`, `--limit`, `--print-cron`, exit code 1 when any row errored. Daemon ticks, skips `once` jobs, survives a failing job.
 - **Not yet verified:** the live gspread path (`open_worksheet` / `read_rows` / `make_write_back`) - no service account on this machine. Parsing and write-back buffering are unit-tested against raw values; the network call is not.

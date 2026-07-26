@@ -8,6 +8,8 @@ decision, the naming contract, cadence safety, and sheet parsing.
 from __future__ import annotations
 
 import os
+import threading
+import time
 
 import pytest
 
@@ -186,6 +188,140 @@ def test_video_args_emit_gop_lock():
 def test_concat_rejects_mismatched_durations():
     with pytest.raises(ValueError):
         ffmpeg_utils.concat_normalized(["a.mp4"], "o.mp4", width=10, height=10, durations=[1, 2])
+
+
+# --------------------------------------------------------------------------- #
+# transitions (P4)
+# --------------------------------------------------------------------------- #
+
+def test_xfade_offsets_accumulate_correctly():
+    filt, out = ffmpeg_utils._xfade_chain(3, [4.0, 3.0, 2.0], "fade", 0.5)
+    parts = filt.split(";")
+    # first xfade starts 0.5s before clip 0 ends
+    assert "offset=3.5000" in parts[0]
+    # running length after the first join is 4 + 3 - 0.5 = 6.5
+    assert "offset=6.0000" in parts[1]
+    assert out == "x2"
+
+
+def test_xfade_total_duration_is_sum_minus_overlaps():
+    durations, d = [4.0, 3.0, 2.0], 0.5
+    filt, _ = ffmpeg_utils._xfade_chain(3, durations, "fade", d)
+    last_offset = float(filt.split("offset=")[-1].split("[")[0])
+    assert round(last_offset + durations[-1], 3) == round(sum(durations) - 2 * d, 3)
+
+
+def test_transition_longer_than_the_shortest_clip_is_refused():
+    with pytest.raises(ValueError) as e:
+        ffmpeg_utils._xfade_chain(2, [4.0, 0.3], "fade", 0.5)
+    assert "shorter than the shortest clip" in str(e.value)
+
+
+def test_transition_without_clip_durations_is_refused():
+    with pytest.raises(ValueError) as e:
+        ffmpeg_utils.concat_normalized(["a.mp4", "b.mp4"], "o.mp4", width=10, height=10,
+                                       transition="fade")
+    assert "clip_durations" in str(e.value)
+
+
+def test_effective_durations_uses_still_hold_for_images(tmp_path):
+    img = tmp_path / "end.png"
+    img.write_bytes(b"\0")
+    assert ffmpeg_utils.effective_durations([str(img)], [None], 3.0) == [3.0]
+    assert ffmpeg_utils.effective_durations([str(img)], [1.5], 3.0) == [1.5]
+
+
+# --------------------------------------------------------------------------- #
+# per-format encoding profiles (P4)
+# --------------------------------------------------------------------------- #
+
+def test_encoding_profile_overrides_only_what_it_states():
+    ff = {"crf": 20, "gop": 25, "video_codec": "libx264",
+          "profiles": {"3840x2160": {"bitrate": "20M", "gop": 50}}}
+    enc = contract.encoding_for(ff, 3840, 2160)
+    assert enc["bitrate"] == "20M" and enc["gop"] == 50
+    assert enc["video_codec"] == "libx264"      # inherited
+    assert "profiles" not in enc                # not leaked into the encoder config
+    assert ff["gop"] == 25                      # base config untouched
+
+
+def test_unmatched_format_keeps_the_base_encoding():
+    ff = {"crf": 20, "profiles": {"3840x2160": {"bitrate": "20M"}}}
+    assert contract.encoding_for(ff, 1080, 1920) is ff
+
+
+def test_profile_switches_rate_control_end_to_end():
+    ff = {"crf": 20, "profiles": {"1920x1080": {"bitrate": "10M"}}}
+    args = ffmpeg_utils.video_args(contract.encoding_for(ff, 1920, 1080))
+    assert "-crf" not in args and args[args.index("-b:v") + 1] == "10M"
+
+
+# --------------------------------------------------------------------------- #
+# transient-failure retries (P4)
+# --------------------------------------------------------------------------- #
+
+class _Resp:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+class _ApiError(Exception):
+    def __init__(self, status):
+        super().__init__(f"api error {status}")
+        self.response = _Resp(status)
+
+
+def test_retry_recovers_from_a_transient_status(monkeypatch):
+    monkeypatch.setattr(sheets.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _ApiError(429)
+        return "ok"
+
+    assert sheets.with_retry(flaky, what="test") == "ok"
+    assert calls["n"] == 3
+
+
+def test_retry_does_not_mask_a_permission_error(monkeypatch):
+    monkeypatch.setattr(sheets.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def forbidden():
+        calls["n"] += 1
+        raise _ApiError(403)
+
+    with pytest.raises(_ApiError):
+        sheets.with_retry(forbidden, what="test")
+    assert calls["n"] == 1, "a 403 is the operator's problem, not a retry candidate"
+
+
+def test_retry_gives_up_and_reraises(monkeypatch):
+    monkeypatch.setattr(sheets.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def always_503():
+        calls["n"] += 1
+        raise _ApiError(503)
+
+    with pytest.raises(_ApiError):
+        sheets.with_retry(always_503, what="test", attempts=4)
+    assert calls["n"] == 4
+
+
+def test_retry_covers_connection_errors_without_a_response(monkeypatch):
+    monkeypatch.setattr(sheets.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionResetError("reset by peer")
+        return "ok"
+
+    assert sheets.with_retry(flaky, what="test") == "ok"
 
 
 # --------------------------------------------------------------------------- #
@@ -380,7 +516,12 @@ def test_runner_refuses_to_silently_overwrite_a_duplicate_output_name():
     s = runner.run_rows(rows, wb, {}, {}, prepare=_fake_prepare,
                         render=lambda p, c, j: "/out/same.mp4")
     assert (s.rendered, s.errors) == (1, 1)
-    assert "collision" in calls[1]["msg"]
+    # The first row to claim the name wins; write-back order is not part of the
+    # contract (collisions surface during planning, renders land afterwards),
+    # so assert per row rather than positionally.
+    by_row = {c["row"]: c for c in calls}
+    assert by_row[2]["status"] == "done"
+    assert by_row[3]["status"] == "error" and "collision" in by_row[3]["msg"]
 
 
 def test_runner_dry_run_renders_nothing():
@@ -411,6 +552,66 @@ def test_runner_reports_a_prepare_failure_per_row():
 
     s = runner.run_rows(rows, wb, {}, {}, prepare=bad_prepare, render=lambda *a: "")
     assert s.errors == 1 and "clip not found" in calls[0]["msg"]
+
+
+def test_runner_renders_in_parallel_without_losing_or_duplicating_rows():
+    rows = [{"_row": i, "stem": f"s{i}", "status": "pending"} for i in range(2, 22)]
+    seen, seen_lock = [], threading.Lock()
+    _calls, wb = _collect()
+
+    def render(plan, cfg, job):
+        time.sleep(0.005)
+        with seen_lock:
+            seen.append(plan["stem"])
+        return f"/out/{plan['stem']}.mp4"
+
+    s = runner.run_rows(rows, wb, {}, {}, prepare=_fake_prepare, render=render, workers=4)
+    assert s.rendered == 20 and s.errors == 0
+    assert sorted(seen) == sorted(f"s{i}" for i in range(2, 22))
+
+
+def test_parallel_workers_each_get_their_own_render_context():
+    rows = [{"_row": i, "stem": f"s{i}", "status": "pending"} for i in range(2, 12)]
+    _calls, wb = _collect()
+    opened, closed, threads = [], [], set()
+    guard = threading.Lock()
+
+    class Ctx:
+        def __enter__(self):
+            with guard:
+                opened.append(threading.current_thread().name)
+            return self
+
+        def __exit__(self, *exc):
+            with guard:
+                closed.append(threading.current_thread().name)
+
+        def render(self, plan, cfg, job):
+            time.sleep(0.005)
+            with guard:
+                threads.add(threading.current_thread().name)
+            return f"/out/{plan['stem']}.mp4"
+
+    s = runner.run_rows(rows, wb, {}, {}, prepare=_fake_prepare, render=None,
+                        render_context=Ctx, workers=3)
+    assert s.rendered == 10 and s.errors == 0
+    assert len(opened) == 3 and sorted(opened) == sorted(closed)
+    # a context is entered and exited by the same thread - Playwright requires it
+    assert threads <= set(opened)
+
+
+def test_parallel_render_failures_stay_per_row():
+    rows = [{"_row": i, "stem": f"s{i}", "status": "pending"} for i in range(2, 12)]
+    calls, wb = _collect()
+
+    def render(plan, cfg, job):
+        if plan["stem"] in ("s3", "s7"):
+            raise RuntimeError("boom " + plan["stem"])
+        return f"/out/{plan['stem']}.mp4"
+
+    s = runner.run_rows(rows, wb, {}, {}, prepare=_fake_prepare, render=render, workers=4)
+    assert (s.rendered, s.errors) == (8, 2)
+    assert sum(1 for c in calls if c["status"] == "error") == 2
 
 
 def test_runner_flushes_the_write_back_buffer():

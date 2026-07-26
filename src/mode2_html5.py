@@ -358,13 +358,23 @@ def render_row(row: dict, cfg: dict, job: dict | None = None) -> str:
 
 
 def run(cfg: dict, rows, write_back, job: dict | None = None, **opts) -> runner.Summary:
-    """Render every pending variant with a single browser for the whole batch."""
+    """Render every pending variant, reusing browsers instead of relaunching.
+
+    Serial runs share one browser for the whole batch. Parallel runs give each
+    worker its own, created and closed inside that worker's thread - Playwright's
+    sync API is bound to the thread that started it.
+    """
     job = job or {}
     rows = list(rows)
     if opts.get("dry_run"):
         # No capture happens, so do not pay for a Chromium launch.
         return runner.run_rows(rows, write_back, cfg, job, prepare=prepare,
                                render=lambda *a: "", **opts)
+
+    if int(opts.get("workers", 1) or 1) > 1:
+        return runner.run_rows(rows, write_back, cfg, job, prepare=prepare,
+                               render=None, render_context=lambda: Session(cfg, job), **opts)
+
     with Session(cfg, job) as sess:
         return runner.run_rows(rows, write_back, cfg, job,
                                prepare=prepare, render=sess.render, **opts)

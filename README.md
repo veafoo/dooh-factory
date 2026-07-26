@@ -24,11 +24,19 @@ python run.py --job mode1 --once           # one job, once (this is what cron ca
 python run.py --job mode1 --dry-run        # resolve inputs + names, render nothing
 python run.py --job mode1 --force          # re-render rows already marked done
 python run.py --job mode2 --limit 5        # stop after 5 rendered rows
+python run.py --job mode2 --workers 4      # render 4 rows concurrently
 python run.py --daemon                     # every job on its cadence (APScheduler)
 python run.py --print-cron                 # crontab lines to review and install
 ```
 
 Exit code is non-zero when any row errored, so cron and CI notice.
+
+**On `--workers`:** it pays off for Mode 2 and not for Mode 1. Measured on an M1 —
+6 static captures went 3.9s to 2.1s on 3 workers, because each row is mostly
+browser latency; 8 stitched creatives went 7.0s to 6.8s on 4 workers, because
+x264 already threads across every core and concurrent encodes just split the
+same CPU. Leave Mode 1 at 1 unless the rushes are small enough that ffmpeg
+process startup dominates.
 
 ### No Google credentials yet?
 
@@ -59,6 +67,7 @@ config. A sheet without the column keeps the plain behaviour - done means done.
 **Mode 1 inputs:** `clip_1..clip_N` (rushes in order; empty cells are skipped, so
 a gap does not truncate the sequence), optional `clip_N_dur` (trims a video,
 sets the hold of a still), `format` (`1080x1920`), `max_duration_s`,
+`transition` + `transition_dur` (any ffmpeg xfade name; empty = hard cut),
 `naming_template` or `output_name`. Stills (jpg/png) are first-class rushes.
 
 **Mode 2 inputs:** `template`, `format`, `capture`, `inject`, `duration_s`,
@@ -83,8 +92,29 @@ python tests/smoke_mode1.py   # real ffmpeg stitch + idempotency contract
 python tests/smoke_mode2.py   # real Chromium capture, all three capture modes
 ```
 
+## Encoding
+
+CRF by default; setting `ffmpeg.bitrate` switches to the CBR-ish rate control
+most DOOH CMS ingest specs ask for. `profile`, `level`, `gop` and `faststart`
+are all configurable for the same reason. `ffmpeg.profiles` carries a per-format
+override, so a 4K landscape network can demand 20 Mbit CBR while portrait city
+panels stay on CRF:
+
+```yaml
+ffmpeg:
+  crf: 20
+  profiles:
+    "3840x2160": {bitrate: "20M", gop: 50}
+```
+
 ## Status
 
-P0-P3 done and tested end-to-end: both modes, idempotency by input hash,
-scheduling (cron + daemon), CLI. Remaining: live Google Sheet run (needs a
-service account), then P4 hardening - see BRIEF §10.
+P0-P4 done and tested end-to-end: both modes, idempotency by input hash,
+scheduling (cron + daemon), xfade transitions, per-format encoding profiles,
+retries on transient Sheets failures, concurrent rendering.
+
+**Not yet verified: the live Google Sheet path.** There is no service account on
+the build machine, so `open_worksheet` / `read_rows` / `make_write_back` have
+never made a real API call. Row parsing and write-back buffering are unit-tested
+against raw values; the network round-trip is not. That is the first thing to
+run against a real sheet.

@@ -30,7 +30,17 @@ ffmpeg:
   faststart: true      # moov atom up front
   default_duration_s: 10   # animated Mode 2 capture when the row says nothing
   still_duration_s: 4      # hold time for a still image used as a Mode 1 rush
+  transition_duration_s: 0.5   # xfade length when a row asks for a transition
   # max_duration_s: 15     # hard cap on any rendered creative
+
+  # Per-format ingest specs. Merged over the block above when a creative's
+  # `format` matches, so a profile only states what differs.
+  profiles:
+    # "3840x2160":
+    #   bitrate: "20M"
+    #   gop: 50
+    # "1920x1080":
+    #   bitrate: "10M"
 
 scheduler:
   timezone: "Europe/Paris"

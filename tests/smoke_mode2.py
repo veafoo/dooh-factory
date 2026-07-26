@@ -128,6 +128,24 @@ def main() -> int:
     assert s.errors == 1, f"missing template should error the row: {s}"
     print("OK -> missing template reported per-row")
 
+    # 6. concurrency: each worker owns its own browser, created and closed in
+    #    its own thread. Nothing lost, nothing duplicated, one bad row contained.
+    many = []
+    for i in range(6):
+        r = dict(STORES[i % len(STORES)])
+        r.update(variant_id=f"p{i}", template="example_store.html", format="1080x1920",
+                 campaign="Parallel", capture="static", naming_template=f"par_{i}",
+                 status="pending", output_path="", input_hash="", _row=i + 20)
+        many.append(r)
+    many[3]["template"] = "nope.html"
+    s = run_batch(many, job, workers=3)
+    assert (s.rendered, s.errors) == (5, 1), f"parallel run: {s}"
+    rendered = [r for r in many if r["status"] == "done"]
+    assert len({r["output_path"] for r in rendered}) == 5
+    for r in rendered:
+        assert os.path.getsize(r["output_path"]) > 5000, f"corrupt output: {r['output_path']}"
+    print("OK -> 5 variants on 3 browsers, bad row contained")
+
     print("PASS")
     return 0
 

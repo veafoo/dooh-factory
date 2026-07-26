@@ -107,6 +107,9 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="re-render rows already marked done")
     ap.add_argument("--dry-run", action="store_true", help="resolve and plan, render nothing")
     ap.add_argument("--limit", type=int, help="stop after N rendered rows")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="render N rows concurrently (default 1; each Mode 2 worker "
+                         "runs its own browser, each Mode 1 worker its own ffmpeg)")
     ap.add_argument("--log-file")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -125,8 +128,11 @@ def main() -> int:
     if not args.job:
         ap.error("give --job <name>, --daemon, or --print-cron")
 
+    if args.workers < 1:
+        ap.error("--workers must be >= 1")
+
     summary = run_job(cfg, args.job, csv_path=args.csv, force=args.force,
-                      dry_run=args.dry_run, limit=args.limit)
+                      dry_run=args.dry_run, limit=args.limit, workers=args.workers)
     print(summary)
     return 1 if summary.errors else 0
 
