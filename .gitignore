@@ -22,7 +22,3 @@ logs/*
 
 # os
 .DS_Store
-
-# local tooling config, not part of the project
-CLAUDE.md
-.claudeignore
