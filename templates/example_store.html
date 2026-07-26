@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Drive-to-store - repiquage d'adresse</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b1020; overflow: hidden; }
+  body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; color: #fff; }
+  .creative { display: flex; flex-direction: column; justify-content: space-between;
+              height: 100vh; padding: 8vh 7vw; box-sizing: border-box; }
+  .brand { font-size: 4.2vh; letter-spacing: .35em; text-transform: uppercase; opacity: .75; }
+  .claim { font-size: 9vh; font-weight: 800; line-height: 1.05; }
+  .claim em { font-style: normal; color: #ffd23f; }
+  .store { border-top: .5vh solid #ffd23f; padding-top: 4vh; }
+  .store-name { font-size: 6vh; font-weight: 700; }
+  .address, .city { font-size: 4vh; opacity: .85; margin-top: 1vh; }
+  .phone { font-size: 3.4vh; opacity: .6; margin-top: 2vh; }
+  /* The pulse is what `capture: video` records; `capture: frames` needs __seek. */
+  .claim { animation: pulse 2s ease-in-out infinite; transform-origin: left center; }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+</style>
+</head>
+<body>
+  <div class="creative">
+    <div class="brand" data-dooh="campaign">CAMPAGNE</div>
+    <div class="claim">Votre magasin<br><em data-dooh="claim">à 5 minutes</em></div>
+    <div class="store">
+      <div class="store-name" data-dooh="store_name">Magasin</div>
+      <div class="address"   data-dooh="address">Adresse</div>
+      <div class="city"      data-dooh="city">Ville</div>
+      <div class="phone"     data-dooh="phone"></div>
+    </div>
+  </div>
+
+<script>
+/* Reference template: works with all four injection modes.
+   - dom         : the factory fills [data-dooh="key"] itself, no JS needed here
+   - query       : ?store_name=...&address=...
+   - window_var  : window.__DATA__ set before this script runs
+   - postmessage : message event after load
+   Also exposes window.__seek(ms) so `capture: frames` is frame-exact. */
+(function () {
+  function apply(data) {
+    if (!data) return;
+    Object.keys(data).forEach(function (key) {
+      document.querySelectorAll('[data-dooh="' + CSS.escape(key) + '"]').forEach(function (el) {
+        if (el.tagName === 'IMG') el.setAttribute('src', data[key]);
+        else el.textContent = data[key];
+      });
+    });
+  }
+
+  apply(window.__DATA__);
+  apply(Object.fromEntries(new URLSearchParams(location.search)));
+  window.addEventListener('message', function (e) { apply(e.data); });
+
+  // Deterministic seek: pause CSS animation and place it at an absolute time.
+  window.__seek = function (ms) {
+    document.getAnimations().forEach(function (a) {
+      a.pause();
+      a.currentTime = ms;
+    });
+  };
+})();
+</script>
+</body>
+</html>
