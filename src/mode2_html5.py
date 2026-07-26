@@ -138,7 +138,7 @@ def prepare(row: dict, cfg: dict, job: dict | None = None) -> dict:
     channel = str(_pick(row, job, "channel", "dooh")).lower()
     audio_track = str(row.get("audio_track", "") or job.get("audio_track", "") or "").strip()
     if audio_track:
-        audio_track = contract.resolve_asset(audio_track, paths["assets_dir"])
+        audio_track = contract.resolve_asset(audio_track, paths.get("assets_dir", "."))
         if not os.path.isfile(audio_track):
             raise FileNotFoundError(f"audio track not found: {audio_track}")
 

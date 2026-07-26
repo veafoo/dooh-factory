@@ -43,6 +43,15 @@ x264 already threads across every core and concurrent encodes just split the
 same CPU. Leave Mode 1 at 1 unless the rushes are small enough that ffmpeg
 process startup dominates.
 
+### See it work in two commands
+
+```
+python scripts/make_demo_assets.py
+python run.py --job mode1 --csv templates/sheet_model/mode1.csv
+```
+
+Renders three creatives, their rendition ladders and their VAST tags into `output/`.
+
 ### No Google credentials yet?
 
 `--csv` drives a job from a local CSV with the same columns and the same

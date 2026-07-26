@@ -106,13 +106,18 @@ cp config/config.example.yml config/config.yml
 ### Without Google credentials (do this first)
 
 ```bash
-python scripts/bootstrap_sheet.py --csv-out templates/sheet_model
-python run.py --job mode1 --csv templates/sheet_model/mode1.csv --dry-run
+python scripts/make_demo_assets.py     # synthesise the rushes the examples name
+python run.py --job mode1 --csv templates/sheet_model/mode1.csv
 ```
+
+That renders three creatives, their rendition ladders and their VAST tags into
+`output/`, using the example rows shipped in `templates/sheet_model/`. It is the
+fastest way to see the whole pipeline work before touching Google.
 
 `--csv` drives a job from a local CSV with the same columns and the same
 contract. A whole campaign can be validated before the sheet exists, and a bad
-render can be reproduced from a single file.
+render can be reproduced from a single file. Regenerate the CSV model at any
+time with `python scripts/bootstrap_sheet.py --csv-out templates/sheet_model`.
 
 ### With Google credentials
 
@@ -422,6 +427,7 @@ behind itself, and a failing job never takes the daemon down.
 | `src/scheduler.py` | cadence grammar, crontab generation, daemon |
 | `scripts/bootstrap_sheet.py` | provision the sheet (or export it as CSV) |
 | `scripts/expand_dco.py` | axes → one row per combination |
+| `scripts/make_demo_assets.py` | synthesise stand-in rushes so a fresh clone renders |
 
 **Two files deserve care.** `contract.py` defines what the sheet means; changing
 it affects campaign tabs that already exist in someone's Drive. `runner.py` is

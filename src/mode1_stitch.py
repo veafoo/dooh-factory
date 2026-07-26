@@ -127,10 +127,13 @@ def prepare(row: dict, cfg: dict, job: dict | None = None) -> dict:
         enc.get("profile"), enc.get("level"), enc.get("gop"), enc.get("pix_fmt"),
         channel, ladder, audio_track,
     ])
+    files = clips + ([audio_track] if audio_track else [])
     return {
         "stem": stem,
-        "files": clips + ([audio_track] if audio_track else []),
-        "hash": contract.compute_input_hash(row, clips, spec),
+        "files": files,
+        # Hash over every input file, the audio track included: replacing the
+        # voice-over on disk has to invalidate the row like replacing a rush.
+        "hash": contract.compute_input_hash(row, files, spec),
         "clips": clips,
         "durations": durations,
         "clip_lengths": clip_lengths,
