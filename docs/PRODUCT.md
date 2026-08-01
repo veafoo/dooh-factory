@@ -121,18 +121,33 @@ time with `python scripts/bootstrap_sheet.py --csv-out templates/sheet_model`.
 
 ### With Google credentials
 
-1. Create a service account in Google Cloud, enable the Sheets and Drive APIs,
-   download the JSON key to `config/service-account.json` (gitignored).
-2. Provision a sheet:
+1. **Google Cloud**: create a project, enable the **Google Sheets API** and the
+   **Google Drive API** (both: Sheets reads and writes cells, Drive opens the
+   file by id and handles sharing). Create a service account, then Keys → Add
+   key → JSON. Save it as `config/service-account.json` and `chmod 600` it. It
+   is git-ignored.
+2. **Provision a sheet**:
    ```bash
    python scripts/bootstrap_sheet.py --create "dooh-factory" --share you@gmail.com
    ```
    `--share` is required: a spreadsheet created by a service account is owned by
    it and will **not** appear in your Drive otherwise.
-   For an existing sheet, share it with the service account's `client_email` as
-   **Editor**, then `--spreadsheet-id <id>`.
+   For a sheet you already own, share it with the service account's
+   `client_email` as **Editor** — Viewer is not enough, the tool writes results
+   back — then `--spreadsheet-id <id>`.
 3. Put the id in `config/config.yml` under `google.spreadsheet_id`.
-4. `python run.py --job mode1 --dry-run`, then without `--dry-run`.
+4. **Diagnose before rendering**:
+   ```bash
+   python run.py --check
+   ```
+   This walks the whole chain and names the fix for each failure. It matters
+   because every setup mistake produces the same symptom otherwise — the run
+   dies inside gspread with a 403 — while having completely different causes:
+   the sheet shared with the wrong address, shared read-only, the Sheets API
+   never enabled, an OAuth client file downloaded instead of a service-account
+   key. The write-permission probe rewrites one cell with the value it already
+   holds, so it is a real write that changes nothing.
+5. `python run.py --job mode1 --dry-run`, then without `--dry-run`.
 
 ---
 
@@ -470,6 +485,7 @@ becomes a path or reaches generated markup, that is the checklist to re-read.
 | `scripts/bootstrap_sheet.py` | provision the sheet (or export it as CSV) |
 | `scripts/expand_dco.py` | axes → one row per combination |
 | `scripts/make_demo_assets.py` | synthesise stand-in rushes so a fresh clone renders |
+| `src/preflight.py` | `--check`: diagnose binaries, config, credentials, sheet access, header contract |
 
 `SECURITY.md` at the root carries the threat model and the per-surface guarantees.
 
@@ -500,7 +516,7 @@ it invalidates exactly the rows it affects.
 ## 13. Testing
 
 ```bash
-pytest tests -q               # 155 offline tests: no ffmpeg, no browser, no credentials
+pytest tests -q               # 174 offline tests: no ffmpeg, no browser, no credentials
 python tests/smoke_mode1.py   # real FFmpeg: stitching, transitions, profiles, idempotency
 python tests/smoke_mode2.py   # real Chromium: all capture modes, concurrency
 ```

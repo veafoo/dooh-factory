@@ -254,7 +254,7 @@ and error messages are identical whatever the worker count.
 
 ### Verified (2026-07-26)
 
-- 155 offline tests pass (`pytest tests -q`), including VAST schema validation per channel and security regressions.
+- 174 offline tests pass (`pytest tests -q`), including VAST schema validation per channel, security regressions and preflight diagnostics.
 - `smoke_mode1.py`: 3 heterogeneous rushes + still endframe -> 1080x1920 @ 25fps, muted, H.264 High/4.1, duration cap honoured; second run skips; a rush changed on disk re-renders; `--force` re-renders; a missing rush errors that row only; xfade shortens 9.0s to 7.5s across 3 transitions; an over-long transition is refused; a per-format profile applies CBR 10M to 1920x1080 and leaves portrait untouched; 6 rows on 3 workers all render valid outputs.
 - `smoke_mode2.py`: static repiquage (two stores, verified visually and by output divergence), real-time video capture (~3s), deterministic frame capture via the seek hook (2.0s), query injection, idempotent second run, missing template errors that row only; 5 variants across 3 concurrent browsers with a bad row contained.
 - CLI: `--dry-run`, `--csv`, `--force`, `--limit`, `--print-cron`, exit code 1 when any row errored. Daemon ticks, skips `once` jobs, survives a failing job.

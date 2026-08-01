@@ -31,6 +31,7 @@ python run.py --job mode1 --force          # re-render rows already marked done
 python run.py --job mode2 --limit 5        # stop after 5 rendered rows
 python run.py --job mode2 --workers 4      # render 4 rows concurrently
 python run.py --daemon                     # every job on its cadence (APScheduler)
+python run.py --check                      # diagnose the setup end to end
 python run.py --print-cron                 # crontab lines to review and install
 ```
 
@@ -123,8 +124,8 @@ python tests/smoke_mode1.py   # real ffmpeg stitch + idempotency contract
 python tests/smoke_mode2.py   # real Chromium capture, all three capture modes
 ```
 
-155 offline tests, including VAST schema validation per channel and security
-regressions. Known gaps are listed in [`docs/PRODUCT.md` §14](docs/PRODUCT.md).
+174 offline tests, including VAST schema validation per channel, security
+regressions and preflight diagnostics. Known gaps are listed in [`docs/PRODUCT.md` §14](docs/PRODUCT.md).
 
 ## Encoding
 

@@ -4,6 +4,7 @@
     python run.py --job mode1 --dry-run       # resolve + plan, render nothing
     python run.py --job mode1 --csv rows.csv  # drive from a local CSV, no Sheet
     python run.py --daemon                    # every job on its cadence
+    python run.py --check                     # diagnose the setup before the first live run
     python run.py --print-cron                # crontab lines to review/install
 
 Exit code is non-zero when any row errored, so cron/CI notices.
@@ -20,9 +21,9 @@ import yaml
 
 if __package__ in (None, ""):  # `python src/main.py` still has to work
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from src import mode1_stitch, mode2_html5, scheduler, sheets
+    from src import mode1_stitch, mode2_html5, preflight, scheduler, sheets
 else:
-    from . import mode1_stitch, mode2_html5, scheduler, sheets
+    from . import mode1_stitch, mode2_html5, preflight, scheduler, sheets
 
 log = logging.getLogger("dooh.main")
 
@@ -102,6 +103,11 @@ def main() -> int:
                     help="explicit single run (default when --job is given)")
     ap.add_argument("--daemon", action="store_true", help="run every job on its cadence")
     ap.add_argument("--print-cron", action="store_true", help="print crontab lines and exit")
+    ap.add_argument("--check", action="store_true",
+                    help="diagnose the setup end to end (binaries, config, credentials, "
+                         "sheet access, header contract) and exit")
+    ap.add_argument("--offline", action="store_true",
+                    help="with --check: skip everything that needs network")
     ap.add_argument("--config", default="config/config.yml")
     ap.add_argument("--csv", help="read rows from a local CSV instead of the Sheet")
     ap.add_argument("--force", action="store_true", help="re-render rows already marked done")
@@ -116,6 +122,14 @@ def main() -> int:
 
     _setup_logging(args.verbose, args.log_file)
     cfg = load_config(args.config)
+
+    if args.check:
+        jobs = [(name, job.get("worksheet", "")) for name, job in (cfg.get("jobs") or {}).items()]
+        if args.job:
+            jobs = [j for j in jobs if j[0] == args.job]
+        report = preflight.run(cfg, jobs, offline=args.offline)
+        print(report.render())
+        return 1 if report.failed else 0
 
     if args.print_cron:
         print("\n".join(scheduler.crontab_lines(cfg, config_path=args.config)))
