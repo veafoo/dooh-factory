@@ -429,7 +429,28 @@ behind itself, and a failing job never takes the daemon down.
 
 ---
 
-## 10. Code map
+## 10. Security
+
+The sheet is **untrusted input**: whoever holds the link edits it, and its cells
+reach a path resolver, an FFmpeg argument list, a headless browser and a
+generated VAST document. Full threat model in [`SECURITY.md`](../SECURITY.md).
+Two things worth knowing before you touch the code:
+
+- **Asset references are confined to the assets directory**, symlinks resolved,
+  absolute refs rejected. A cell reading `../../../.ssh/id_rsa` used to be
+  resolved, read, and stitched into a creative that then leaves the building.
+  `contract.resolve_asset` raises `AssetOutsideBase` now. The escape hatch is an
+  env var (`DOOH_ALLOW_ASSETS_OUTSIDE_BASE`) rather than a config key, so the
+  exception stays explicit per run instead of being inherited from a checked-in
+  config nobody remembers.
+- **URLs going into VAST have `]]>` neutralised.** A tracking URL from the sheet
+  containing that sequence closed the CDATA section early: malformed XML at
+  best, element injection into the served tag at worst.
+
+Both are locked by regression tests. If you add a new place where a sheet cell
+becomes a path or reaches generated markup, that is the checklist to re-read.
+
+## 11. Code map
 
 | File | Responsibility |
 |---|---|
@@ -450,6 +471,8 @@ behind itself, and a failing job never takes the daemon down.
 | `scripts/expand_dco.py` | axes → one row per combination |
 | `scripts/make_demo_assets.py` | synthesise stand-in rushes so a fresh clone renders |
 
+`SECURITY.md` at the root carries the threat model and the per-surface guarantees.
+
 **Two files deserve care.** `contract.py` defines what the sheet means; changing
 it affects campaign tabs that already exist in someone's Drive. `runner.py` is
 the only place batch semantics live; if you find yourself duplicating its logic
@@ -457,7 +480,7 @@ inside a mode, stop and extend the hook instead.
 
 ---
 
-## 11. Extending it
+## 12. Extending it
 
 **Add a creative variable (Mode 2).** Add a column. It is injected automatically.
 
@@ -474,10 +497,10 @@ it invalidates exactly the rows it affects.
 
 ---
 
-## 12. Testing
+## 13. Testing
 
 ```bash
-pytest tests -q               # 146 offline tests: no ffmpeg, no browser, no credentials
+pytest tests -q               # 155 offline tests: no ffmpeg, no browser, no credentials
 python tests/smoke_mode1.py   # real FFmpeg: stitching, transitions, profiles, idempotency
 python tests/smoke_mode2.py   # real Chromium: all capture modes, concurrency
 ```
@@ -489,7 +512,7 @@ real encoder and a real browser can prove.
 
 ---
 
-## 13. Known gaps
+## 14. Known gaps
 
 Honest list. None of these are hidden in a backlog somewhere else.
 

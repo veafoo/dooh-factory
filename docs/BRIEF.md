@@ -254,7 +254,7 @@ and error messages are identical whatever the worker count.
 
 ### Verified (2026-07-26)
 
-- 146 offline tests pass (`pytest tests -q`), including VAST schema validation per channel.
+- 155 offline tests pass (`pytest tests -q`), including VAST schema validation per channel and security regressions.
 - `smoke_mode1.py`: 3 heterogeneous rushes + still endframe -> 1080x1920 @ 25fps, muted, H.264 High/4.1, duration cap honoured; second run skips; a rush changed on disk re-renders; `--force` re-renders; a missing rush errors that row only; xfade shortens 9.0s to 7.5s across 3 transitions; an over-long transition is refused; a per-format profile applies CBR 10M to 1920x1080 and leaves portrait untouched; 6 rows on 3 workers all render valid outputs.
 - `smoke_mode2.py`: static repiquage (two stores, verified visually and by output divergence), real-time video capture (~3s), deterministic frame capture via the seek hook (2.0s), query injection, idempotent second run, missing template errors that row only; 5 variants across 3 concurrent browsers with a bad row contained.
 - CLI: `--dry-run`, `--csv`, `--force`, `--limit`, `--print-cron`, exit code 1 when any row errored. Daemon ticks, skips `once` jobs, survives a failing job.
@@ -355,3 +355,26 @@ on nothing else, so nobody "fixes" it by dropping them.
 
 Schema conformance is not acceptance. A pass through the IAB VAST Validator
 service, and playback in a real player on real inventory, remain to be done.
+
+---
+
+## 13. Security (2026-07-26 audit)
+
+The sheet is untrusted input by nature. A dedicated review pass found two
+findings, both reachable from a cell, both fixed and locked by tests. Threat
+model and per-surface guarantees: `SECURITY.md`.
+
+- **Path traversal through an asset reference.** `resolve_asset` joined a cell
+  against the assets dir and let absolute paths through, so `../../../.ssh/id_rsa`
+  was resolved, read, and could be stitched into a creative that then leaves the
+  building. Now: realpath, confinement to the base, `AssetOutsideBase` otherwise.
+  The escape hatch is an environment variable rather than a config key, so the
+  exception is explicit per invocation and cannot be inherited silently.
+- **CDATA injection into the generated VAST.** Sheet-provided URLs were inserted
+  verbatim; a `]]>` closed the section early and allowed element injection into
+  the served tag. Now split across two CDATA sections.
+
+Standing guarantees worth not breaking: FFmpeg is always called with an argument
+list and never a shell string; every output stem passes through
+`naming.sanitize()`, so a cell cannot inject a path separator; config is
+`yaml.safe_load` only; no `eval`/`exec`/`pickle` anywhere.

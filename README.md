@@ -10,7 +10,7 @@ Automated DOOH creative factory. Reads a Google Sheet, renders flat creatives (M
 - **Delivery** - every creative ships as a rendition ladder (DOOH / CTV / mobile / radio / web) wrapped in a VAST 4.2 tag.
 
 **Start here:** [`docs/PRODUCT.md`](docs/PRODUCT.md) - full product documentation, written for someone who has never seen the project.
-Column reference: [`docs/SHEET_MODEL.md`](docs/SHEET_MODEL.md). Original spec: [`docs/BRIEF.md`](docs/BRIEF.md).
+Column reference: [`docs/SHEET_MODEL.md`](docs/SHEET_MODEL.md). Threat model: [`SECURITY.md`](SECURITY.md). Original spec: [`docs/BRIEF.md`](docs/BRIEF.md).
 
 ## Install
 
@@ -123,8 +123,8 @@ python tests/smoke_mode1.py   # real ffmpeg stitch + idempotency contract
 python tests/smoke_mode2.py   # real Chromium capture, all three capture modes
 ```
 
-146 offline tests, including VAST schema validation per channel. Known gaps are
-listed in [`docs/PRODUCT.md` §13](docs/PRODUCT.md).
+155 offline tests, including VAST schema validation per channel and security
+regressions. Known gaps are listed in [`docs/PRODUCT.md` §14](docs/PRODUCT.md).
 
 ## Encoding
 
